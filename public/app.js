@@ -663,9 +663,9 @@ async function pumpModels(){
   } finally{ thumbJobs.running=false; }
 }
 function queueThumbs(){
-  if(!canWrite||!libOpen()) return;
+  if(!libOpen()) return;
   if(libTab==="base"){ for(const key of Object.keys(LIB)) if(!baseThumbSrc(key)&&!thumbJobs.baseQ.includes(key)) thumbJobs.baseQ.push(key); pumpBase(); }
-  else { for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
+  else if(canWrite){ for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
 }
 function cubeIcon(){
   const s=document.createElementNS("http://www.w3.org/2000/svg","svg"); s.setAttribute("viewBox","0 0 24 24"); s.setAttribute("width","30"); s.setAttribute("height","30");
@@ -720,7 +720,7 @@ function makeCard({id,kind,name,dims,extra,src,failed,onPlace,onInfo,build}){
       thumb.prepend(im);
     } else { thumb.querySelectorAll("img").forEach(n=>n.remove()); const f=failed(); const p=thumb.querySelector(".ph"); if(!p||p.dataset.f!==String(f)){ p?.remove(); const n=placeholder(f); n.dataset.f=String(f); thumb.prepend(n); } }
   };
-  main.disabled=!canWrite; main.onclick=onPlace; info.onclick=onInfo;
+  main.title=canWrite?"Поставить в сцену":"Предпросмотр"; main.onclick=canWrite?onPlace:onInfo; info.onclick=onInfo;
   bindSpin(root,thumb,build);
   cards.set(kind+":"+id,{patch}); patch();
   return root;
@@ -730,7 +730,7 @@ const modelThumbSrc=m=>m.thumb?"/uploads/"+m.thumb+"?t="+(m.thumbAt||0):null;
 function renderLib(){
   const L=$("libList"); stopSpin(); L.textContent=""; cards.clear();
   $("tBase").setAttribute("aria-pressed",libTab==="base"); $("tUp").setAttribute("aria-pressed",libTab==="up");
-  $("uploadRow").hidden=(libTab!=="up"); $("libSort").hidden=(libTab!=="up");
+  $("uploadRow").hidden=(libTab!=="up"||!canWrite); $("libSort").hidden=(libTab!=="up");
   const q=libQuery.trim().toLowerCase(), hit=n=>!q||String(n).toLowerCase().includes(q);
   if(libTab==="base"){
     for(const[key,def]of Object.entries(LIB)){
@@ -790,9 +790,9 @@ async function openPreview(ref){
   const upd=()=>{ if(!isBase&&!cur()){ closePreview(); toast("Модель удалена."); return; } h2.textContent=title(); dimsEl.textContent=fmtDims(dimsNow()); };
   upd();
 
-  const place=el("button",{class:"primary",text:"Поставить в сцену"}); place.disabled=!canWrite;
+  const place=el("button",{class:"primary",text:"Поставить в сцену"});
   place.onclick=()=>{ const doc=isBase?{type:"builtin",key:ref.key,color:LIB[ref.key].color,r:0,s:1}:{type:"model",model:ref.id,r:0,s:1}; closePreview(); startPlacing({doc}); };
-  actions.append(place);
+  if(canWrite) actions.append(place);
   const refresh=el("button",{text:"Обновить превью"});
   refresh.onclick=async()=>{
     refresh.disabled=true; msg.textContent="Перерисовываю…";
@@ -836,7 +836,7 @@ async function openPreview(ref){
   const cv=renderer.domElement; cv.className="pv-cv"; cv.setAttribute("aria-label","3D-предпросмотр"); p.ro.observe(view);
   p.controls=new THREE.OrbitControls(cam,cv); p.controls.enableDamping=true; p.controls.dampingFactor=0.08; p.controls.autoRotate=true; p.controls.autoRotateSpeed=1.2; p.controls.enablePan=false;
   p.controls.addEventListener("start",()=>{ p.controls.autoRotate=false; });
-  (place.disabled?close:place).focus();
+  (canWrite?place:close).focus();
   let obj;
   try{ obj=isBase?baseObject(ref.key):await loadFresh(cur()); }
   catch(e){ console.warn(e); if(pv===p) view.firstChild.textContent="Не удалось загрузить модель."; return; }
@@ -1148,7 +1148,7 @@ $("bHist").onclick=()=>{ if(!canWrite) return; if($("houseHist").hidden) renderH
 
 function applyRole(){
   $("bHouse").hidden=!canWrite; $("bHist").hidden=!canWrite; if(!canWrite) closeHist();
-  $("lib").hidden=!canWrite; $("bLib").hidden=!canWrite; $("viewBadge").hidden=canWrite;
+  $("viewBadge").hidden=canWrite;
   Picker.setProject(Picker.project,canWrite);
   renderLib(); renderTools(); renderCtx();
 }

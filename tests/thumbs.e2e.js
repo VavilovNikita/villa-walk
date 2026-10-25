@@ -66,7 +66,9 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
       return page;
     };
     const editor = await mk("editor", KEY), viewer = await mk("viewer", null);
-    assert(await editor.isVisible("#lib") && !(await viewer.isVisible("#lib")), "only the editor sees the library");
+    assert(await editor.isVisible("#lib") && await viewer.isVisible("#lib"), "both see the library");
+    await viewer.waitForFunction(() => document.querySelectorAll("#libList .thumb img").length === 15, null, { timeout: 90000 });
+    step("viewer sees the base library with its own client-rendered thumbnails");
 
     /* base tab: client-rendered thumbnails, cached in localStorage, never sent to the server */
     await editor.waitForFunction(() => document.querySelectorAll("#libList .thumb img").length === 15, null, { timeout: 90000 });
@@ -83,12 +85,15 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     await editor.fill("#libSearch", ""); assert.strictEqual(await editor.locator("#libList .card").count(), 15);
 
     /* viewer: switch its (hidden) library to the uploaded tab to watch the cards */
-    await viewer.evaluate(() => { window.__noReload = 1; document.getElementById("tUp").click(); });
+    await viewer.evaluate(() => { window.__noReload = 1; });
+    await viewer.click("#tUp");
+    await viewer.fill("#libSearch", "zzz"); assert.strictEqual(await viewer.locator("#libList .card").count(), 0); await viewer.fill("#libSearch", "");
     await editor.click("#tUp");
+    assert(await editor.isVisible("#bUpload") && !(await viewer.isVisible("#bUpload")), "only the editor can upload");
 
     /* 1. editor uploads through the UI -> viewer gets the card with a thumbnail, no reload */
     await editor.setInputFiles("#fileIn", glbFile("tablea.glb", 1.2, 0.5, 0.6, [0.8, 0.3, 0.2]));
-    await viewer.waitForSelector("#libList .card", { state: "attached" });
+    await viewer.waitForSelector("#libList .card");
     await viewer.waitForFunction(() => { const i = document.querySelector("#libList .card img"); return i && /^\/uploads\/[a-f0-9]{16}\.thumb\.(webp|png)\?t=\d+$/.test(i.getAttribute("src")); }, null, { timeout: 30000 });
     assert.strictEqual(await viewer.evaluate(() => window.__noReload), 1, "viewer was not reloaded");
     let st = await state(); const A = Object.keys(st.models)[0];
@@ -115,6 +120,26 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     assert.strictEqual(await rawThumb(A, body, ct, KEY), 200);
     assert.strictEqual((await state()).models[A].thumb, st.models[A].thumb);
     step("viewer / wrong key -> 403; fake image, 400 KB, wrong type, unknown model all refused");
+
+    /* viewer: preview window works (rotation, size) but offers no editing actions */
+    await viewer.locator("#libList .card .card-i").click();
+    await viewer.waitForFunction(() => window.__villa().preview?.loaded, null, { timeout: 20000 });
+    assert.match(await viewer.locator("#pv .meta.mono").first().textContent(), /1200×600×500 мм/);
+    assert.strictEqual(await viewer.locator("#pv .pv-actions button").count(), 0, "no action buttons for the viewer");
+    const vb = await viewer.locator("#pv .pv-cv").boundingBox(), vz = (await viewer.evaluate(() => window.__villa().preview)).az;
+    await viewer.mouse.move(vb.x + vb.width / 2, vb.y + vb.height / 2); await viewer.mouse.down(); await viewer.mouse.move(vb.x + vb.width / 2 + 120, vb.y + vb.height / 2, { steps: 8 }); await viewer.mouse.up();
+    assert(Math.abs((await viewer.evaluate(() => window.__villa().preview)).az - vz) > 0.3, "viewer can rotate");
+    await viewer.keyboard.press("Escape"); await viewer.waitForSelector("#pv", { state: "detached" });
+    await viewer.locator("#libList .card-main").first().click(); // clicking a card opens the preview, never places
+    await viewer.waitForSelector("#pv"); assert.strictEqual((await viewer.evaluate(() => window.__villa().items)), 0); await viewer.keyboard.press("Escape");
+    const nk = { method: "PATCH", headers: { "content-type": "application/json" }, body: '{"name":"x"}' };
+    assert.strictEqual((await fetch(`${BASE}/api/models/${A}`, nk)).status, 403);
+    assert.strictEqual((await fetch(`${BASE}/api/models/${A}`, { ...nk, headers: { ...nk.headers, "x-edit-key": "wrong-key-wrong-key" } })).status, 403);
+    assert.strictEqual((await fetch(`${BASE}/api/models/${A}`, { method: "DELETE" })).status, 403);
+    const fd = new FormData(); fd.append("file", new Blob([boxGlb(1, 1, 1, [1, 0, 0])]), "x.glb");
+    assert.strictEqual((await fetch(`${BASE}/api/models`, { method: "POST", body: fd })).status, 403);
+    assert.strictEqual((await state()).models[A].name, "tablea");
+    step("viewer: preview + rotation + size, no action buttons; PATCH/DELETE/upload without key -> 403");
 
     /* 3. a model that has no thumbnail (uploaded through the API) is filled in when the editor opens the tab */
     await editor.click("#tBase");
