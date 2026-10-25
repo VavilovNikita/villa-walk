@@ -10,7 +10,7 @@ const EDIT_KEY = process.env.EDIT_KEY || "";
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, "..", "data"));
 if (EDIT_KEY.length < 16) { console.error("EDIT_KEY is missing or too short (set it in .env)"); process.exit(1); }
 
-const MAX_PEERS = 40, MAX_MODEL_BYTES = 30 * 1024 * 1024, MAX_ITEMS = 3000, MAX_MODELS = 300;
+const MAX_PEERS = 40, MAX_MODEL_BYTES = 30 * 1024 * 1024, MAX_ITEMS = 3000, MAX_MODELS = 300, MAX_THUMB_BYTES = 300 * 1024, MAX_THUMB_PX = 1024;
 const UPLOADS = path.join(DATA_DIR, "uploads"), MODELS = path.join(DATA_DIR, "models");
 fs.mkdirSync(UPLOADS, { recursive: true }); fs.mkdirSync(MODELS, { recursive: true });
 
@@ -109,7 +109,10 @@ app.register(require("@fastify/static"), { root: UPLOADS, prefix: "/uploads/", d
 app.register(require("@fastify/static"), { root: MODELS, prefix: "/models/", decorateReply: false, cacheControl: false, index: false, dotfiles: "deny" });
 app.register(require("@fastify/multipart"), { limits: { fileSize: MAX_MODEL_BYTES, files: 1, fields: 4, fieldSize: 1024 } });
 
-const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: collection("items"), models: collection("models"), swatches: getDoc("swatches", "project") || { colors: [] } });
+/* models saved before thumbnails existed have no thumb fields: expose them as null without touching the stored rows */
+const modelOut = d => ({ thumb: null, thumbAt: null, ...d });
+const models = () => Object.fromEntries(Object.entries(collection("models")).map(([id, d]) => [id, modelOut(d)]));
+const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: collection("items"), models: models(), swatches: getDoc("swatches", "project") || { colors: [] } });
 app.get("/api/state", async (req, reply) => { reply.header("Cache-Control", "no-store"); return snapshot(); });
 app.get("/api/health", async () => ({ ok: true, peers: peers.size }));
 
@@ -168,7 +171,7 @@ app.post("/api/models", async (req, reply) => {
     const f = part.fields.name;
     const name = clean(f && f.value) || clean(String(part.filename || "").replace(/\.glb$/i, "")) || "Модель";
     const by = clean(req.headers["x-uid"], 32).replace(/[^A-Za-z0-9]/g, "") || "editor";
-    const doc = { name, file, sizeBytes: size, by, at: Date.now() };
+    const doc = { name, file, sizeBytes: size, by, at: Date.now(), thumb: null, thumbAt: null };
     putDoc("models", id, doc);
     broadcast({ t: "model.added", id, doc });
     return { id, doc };
@@ -179,6 +182,54 @@ app.post("/api/models", async (req, reply) => {
   }
 });
 
+/* ---- thumbnails: raw image body (PNG / WebP) -> uploads/<id>.thumb.<ext> ---- */
+app.addContentTypeParser(["image/webp", "image/png"], { parseAs: "buffer", bodyLimit: MAX_THUMB_BYTES }, (req, body, done) => done(null, body));
+/* returns {ext,w,h} for a well-formed PNG or WebP, otherwise null */
+function sniffImage(b) {
+  if (b.length < 30) return null;
+  if (b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) && b.toString("latin1", 12, 16) === "IHDR")
+    return { ext: "png", w: b.readUInt32BE(16), h: b.readUInt32BE(20) };
+  if (b.toString("latin1", 0, 4) === "RIFF" && b.toString("latin1", 8, 12) === "WEBP" && b.readUInt32LE(4) === b.length - 8) {
+    const t = b.toString("latin1", 12, 16);
+    if (t === "VP8X") return { ext: "webp", w: 1 + b.readUIntLE(24, 3), h: 1 + b.readUIntLE(27, 3) };
+    if (t === "VP8L" && b[20] === 0x2f) { const v = b.readUInt32LE(21); return { ext: "webp", w: 1 + (v & 0x3fff), h: 1 + ((v >> 14) & 0x3fff) }; }
+    if (t === "VP8 " && b[23] === 0x9d && b[24] === 0x01 && b[25] === 0x2a) return { ext: "webp", w: b.readUInt16LE(26) & 0x3fff, h: b.readUInt16LE(28) & 0x3fff };
+  }
+  return null;
+}
+const THUMB_EXT = ["webp", "png"];
+const rmThumbs = id => { for (const e of THUMB_EXT) fs.rmSync(path.join(UPLOADS, id + ".thumb." + e), { force: true }); };
+const dimMm = v => { const n = Number(v); return Number.isFinite(n) && n > 0 && n <= 100000 ? Math.round(n) : null; };
+app.post("/api/models/:id/thumb", { bodyLimit: MAX_THUMB_BYTES }, async (req, reply) => {
+  if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
+  const { id } = req.params; const doc = idOk(id, ID) && getDoc("models", id);
+  if (!doc) return reply.code(404).send({ error: "not_found" });
+  const buf = req.body;
+  if (!Buffer.isBuffer(buf) || !buf.length) return reply.code(400).send({ error: "no_image" });
+  if (buf.length > MAX_THUMB_BYTES) return reply.code(413).send({ error: "too_large" });
+  const img = sniffImage(buf);
+  if (!img || !img.w || !img.h || img.w > MAX_THUMB_PX || img.h > MAX_THUMB_PX) return reply.code(400).send({ error: "bad_image" });
+  const file = id + ".thumb." + img.ext, tmp = path.join(UPLOADS, id + ".thumb.part");
+  fs.writeFileSync(tmp, buf); fs.renameSync(tmp, path.join(UPLOADS, file));
+  for (const e of THUMB_EXT) if (e !== img.ext) fs.rmSync(path.join(UPLOADS, id + ".thumb." + e), { force: true });
+  const w = dimMm(req.query.w), d = dimMm(req.query.d), h = dimMm(req.query.h);
+  const next = { ...doc, thumb: file, thumbAt: Date.now() };
+  if (w && d && h) next.dims = [w, d, h];
+  putDoc("models", id, next);
+  broadcast({ t: "model.updated", id, doc: modelOut(next) });
+  return { ok: true, doc: modelOut(next) };
+});
+app.patch("/api/models/:id", async (req, reply) => {
+  if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
+  const { id } = req.params; const doc = idOk(id, ID) && getDoc("models", id);
+  if (!doc) return reply.code(404).send({ error: "not_found" });
+  const name = clean(req.body && req.body.name);
+  if (!name) return reply.code(400).send({ error: "invalid" });
+  const next = { ...doc, name }; putDoc("models", id, next);
+  broadcast({ t: "model.updated", id, doc: modelOut(next) });
+  return { ok: true, doc: modelOut(next) };
+});
+
 app.delete("/api/models/:id", async (req, reply) => {
   if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
   const { id } = req.params; const doc = idOk(id, ID) && getDoc("models", id);
@@ -186,6 +237,7 @@ app.delete("/api/models/:id", async (req, reply) => {
   for (const [iid, it] of Object.entries(collection("items"))) if (it.model === id) { q.del.run("items", iid); broadcast({ t: "item.delete", id: iid }); }
   q.del.run("models", id);
   fs.rmSync(path.join(UPLOADS, path.basename(doc.file)), { force: true });
+  rmThumbs(id);
   broadcast({ t: "model.deleted", id });
   return { ok: true };
 });

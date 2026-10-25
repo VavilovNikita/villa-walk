@@ -82,6 +82,8 @@ async function api(method,url,body,extra){
   return j;
 }
 S.upload=(file,name)=>{ const fd=new FormData(); fd.append("name",name); fd.append("file",file,file.name); return api("POST","/api/models",fd); };
+S.uploadThumb=(id,blob,mm)=>api("POST","/api/models/"+encodeURIComponent(id)+"/thumb?w="+mm[0]+"&d="+mm[1]+"&h="+mm[2],blob,{"content-type":blob.type});
+S.renameModel=(id,name)=>api("PATCH","/api/models/"+encodeURIComponent(id),JSON.stringify({name}),{"content-type":"application/json"});
 S.removeModel=id=>api("DELETE","/api/models/"+encodeURIComponent(id));
 
 S.houseInfo=async()=>{ const r=await fetch("/api/house",{cache:"no-store",headers:{"x-edit-key":key}}); if(!r.ok) throw new Error("http "+r.status); return r.json(); };

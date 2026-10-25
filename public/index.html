@@ -57,15 +57,40 @@ button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--acc
 .chip.me{border-color:var(--accent)}
 
 /* library */
-#lib{left:max(12px,env(safe-area-inset-left,0px));top:calc(70px + env(safe-area-inset-top,0px));width:250px;max-height:calc(100% - 160px);display:flex;flex-direction:column}
+#lib{left:max(12px,env(safe-area-inset-left,0px));top:calc(70px + env(safe-area-inset-top,0px));width:300px;max-height:calc(100% - 160px);display:flex;flex-direction:column}
 #lib header{display:flex;justify-content:space-between;align-items:center;padding:10px 12px 6px}
 #lib .tabs{display:flex;gap:4px;padding:0 12px 8px}
-#lib .list{flex:1 1 auto;min-height:0;overflow:auto;padding:0 8px 10px;display:grid;grid-template-columns:1fr 1fr;grid-auto-rows:min-content;align-content:start;gap:6px}
-.item-btn{display:flex;flex-direction:column;align-items:flex-start;justify-content:flex-start;gap:2px;text-align:left;padding:8px;height:auto;min-height:56px;min-width:0}
-.item-btn b{font-weight:500}
-.item-btn span{font-size:11px;color:var(--muted)}
+.libtools{display:flex;gap:6px;padding:0 12px 8px}
+.libtools input{flex:1;min-width:0;height:32px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel-solid);box-sizing:border-box}
+.libtools select{height:32px;border:1px solid var(--line);border-radius:8px;background:var(--panel-solid);padding:0 4px}
+#lib .list{flex:1 1 auto;min-height:0;overflow:auto;padding:0 8px 10px;display:grid;grid-template-columns:1fr 1fr;grid-auto-rows:min-content;align-content:start;gap:8px}
+#lib .list .empty{grid-column:1/-1;padding:4px}
+.card{position:relative;min-width:0}
+.card-main{display:flex;flex-direction:column;align-items:stretch;gap:2px;text-align:left;padding:5px 5px 6px;height:auto;width:100%;min-width:0;user-select:none;-webkit-user-select:none;-webkit-touch-callout:none}
+.card-main:disabled{opacity:1;cursor:default}
+.card-main .cn{font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:0 2px}
+.card-main .cd,.card-main .ce{font-size:10.5px;color:var(--muted);padding:0 2px}
+.thumb{position:relative;aspect-ratio:1;border-radius:6px;background:var(--accent-soft);overflow:hidden}
+.thumb img,.thumb canvas.spin{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;display:block}
+.thumb canvas.spin{pointer-events:none}
+.thumb.spinning img{visibility:hidden}
+.thumb .ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:var(--muted);font-size:11px;text-align:center}
+.card-i{position:absolute;top:8px;right:8px;width:24px;height:24px;min-height:0;padding:0;border-radius:50%;font:italic 600 13px/22px Georgia,serif;background:var(--panel);text-align:center}
 #uploadRow{padding:0 12px 12px;display:flex;flex-direction:column;gap:6px}
 #lib.collapsed .tabs,#lib.collapsed .list,#lib.collapsed #uploadRow{display:none}
+
+
+/* preview window */
+.pv-back{position:fixed;inset:0;z-index:25;display:grid;place-items:center;background:rgba(15,25,21,.55);padding:12px}
+.pv-dlg{position:static;width:min(520px,100%);max-height:100%;overflow:auto;padding:12px;display:flex;flex-direction:column;gap:8px}
+.pv-head{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.pv-head h2{margin:0;font-size:17px;font-weight:600;min-width:0;overflow-wrap:anywhere}
+.pv-view{position:relative;aspect-ratio:4/3;border-radius:8px;background:var(--accent-soft);overflow:hidden;touch-action:none}
+.pv-cv{position:absolute;inset:0;width:100%;height:100%;display:block;touch-action:none;outline:none}
+.pv-load{position:absolute;inset:0;display:grid;place-items:center;color:var(--muted)}
+.pv-confirm{gap:6px}.pv-confirm .pv-name{flex:1;min-width:120px;height:32px;padding:0 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel-solid);box-sizing:border-box}
+.pv-ask{flex-basis:100%}
+button.primary-danger{background:var(--danger);color:#fff;border-color:var(--danger)}
 
 /* context */
 #ctx{right:max(12px,env(safe-area-inset-right,0px));top:calc(70px + env(safe-area-inset-top,0px));width:270px;padding:12px;display:flex;flex-direction:column;gap:10px;max-height:calc(100% - 270px);overflow:auto}
@@ -180,6 +205,10 @@ button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--acc
     <button id="tBase" aria-pressed="true">Базовая</button>
     <button id="tUp" aria-pressed="false">Загруженные</button>
   </div>
+  <div class="libtools">
+    <input id="libSearch" type="search" placeholder="Поиск по названию" aria-label="Поиск по названию" autocomplete="off">
+    <select id="libSort" aria-label="Сортировка" hidden><option value="new">Новые</option><option value="name">По названию</option></select>
+  </div>
   <div class="list" id="libList"></div>
   <div id="uploadRow" hidden>
     <button id="bUpload" class="primary">Загрузить 3D-модель (.glb)</button>
@@ -208,6 +237,7 @@ button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--acc
 <script src="/vendor/three.min.js"></script>
 <script src="/vendor/GLTFLoader.js"></script>
 <script src="/vendor/OrbitControls.js"></script>
+<script src="/thumbs.js"></script>
 <script src="/sync.js"></script>
 <script src="/picker.js"></script>
 <script src="/app.js"></script>

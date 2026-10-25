@@ -591,38 +591,266 @@ function renderPlaceBar(){
 }
 
 /* ---------------- library ---------------- */
+const LIB_VER="1";                       // bump when LIB geometry / colours change: invalidates cached base thumbnails
+const THUMB_LS="villa.thumb."+LIB_VER+".";
+const lsGet=k=>{ try{ return localStorage.getItem(k); }catch{ return null; } };
+const lsSet=(k,v)=>{ try{ localStorage.setItem(k,v); }catch{} };
+let libQuery="", libSort="new";
+const baseThumbs=new Map();              // key -> dataURL (memory; localStorage as second level)
+const baseDims=new Map();                // key -> [w,d,h] mm
+const cards=new Map();                   // "base:key" | "up:id" -> {patch()}
+const thumbJobs={q:[],running:false,seen:new Set(),failed:new Set(),baseQ:[],baseRunning:false};
+
+const fmtDims=d=>d?d.join("×")+" мм":"— мм";
+const fmtSize=b=>b<1048576?Math.max(1,Math.round((b||0)/1024))+" КБ":(b/1048576).toFixed(1)+" МБ";
+const libOpen=()=>!$("lib").classList.contains("collapsed");
+const baseObject=key=>{ const def=LIB[key]; return def.build(mat(def.color,0.8)); };
+const mmOf=sz=>[Math.round(sz.x*1000),Math.round(sz.z*1000),Math.round(sz.y*1000)];
+function dimsOfBase(key){
+  if(!baseDims.has(key)){ const o=baseObject(key), sz=new THREE.Vector3(); new THREE.Box3().setFromObject(o).getSize(sz); baseDims.set(key,mmOf(sz)); Thumbs.disposeObject(o); }
+  return baseDims.get(key);
+}
+function readDataUrl(blob){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(blob); }); }
+function baseThumbSrc(key){
+  if(baseThumbs.has(key)) return baseThumbs.get(key);
+  const v=lsGet(THUMB_LS+key); if(v&&v.startsWith("data:image/")){ baseThumbs.set(key,v); return v; }
+  return null;
+}
+async function makeBaseThumb(key){
+  const o=baseObject(key);
+  try{ const {blob}=await Thumbs.renderThumb(o); const url=await readDataUrl(blob); baseThumbs.set(key,url); lsSet(THUMB_LS+key,url); }
+  finally{ Thumbs.disposeObject(o); }
+}
+/* base furniture is drawn by the client on first open of the tab, one at a time; nothing goes to the server */
+async function pumpBase(){
+  if(thumbJobs.baseRunning) return; thumbJobs.baseRunning=true;
+  try{
+    while(thumbJobs.baseQ.length){
+      const key=thumbJobs.baseQ.shift();
+      try{ await makeBaseThumb(key); }catch(e){ console.warn("thumb",key,e); }
+      cards.get("base:"+key)?.patch();
+      await new Promise(r=>setTimeout(r,0));
+    }
+  } finally{ thumbJobs.baseRunning=false; }
+}
+
+/* uploaded models: normalise units / pivot (mm, cm -> m; origin at bottom centre) */
+function normalizeModel(root){
+  const bb=new THREE.Box3().setFromObject(root), sz=new THREE.Vector3(), c=new THREE.Vector3(); bb.getSize(sz); bb.getCenter(c);
+  let k=1; const mx=Math.max(sz.x,sz.y,sz.z); if(mx>60) k=0.001; else if(mx>6) k=0.01;
+  const wrap=new THREE.Group(); root.position.set(-c.x,-bb.min.y,-c.z); const inner=new THREE.Group(); inner.add(root); inner.scale.setScalar(k); wrap.add(inner);
+  return wrap;
+}
+/* own copy of a model, never shared with the scene: the caller disposes it */
+const loadFresh=m=>loadGltf("/uploads/"+m.file).then(g=>normalizeModel(g.scene));
+async function makeModelThumb(id){
+  const m=models.get(id); if(!m) return;
+  const wrap=await loadFresh(m);
+  try{
+    const {blob,size}=await Thumbs.renderThumb(wrap);
+    const r=await Sync.uploadThumb(id,blob,mmOf(size));
+    if(r?.doc&&models.has(id)){ models.set(id,r.doc); cards.get("up:"+id)?.patch(); }
+  } finally{ Thumbs.disposeObject(wrap); }
+}
+/* the editor fills in missing thumbnails of already uploaded models, strictly one after another */
+async function pumpModels(){
+  if(thumbJobs.running) return; thumbJobs.running=true;
+  try{
+    while(thumbJobs.q.length&&canWrite){
+      const id=thumbJobs.q.shift(); if(!models.has(id)) continue;
+      try{ await makeModelThumb(id); }catch(e){ thumbJobs.failed.add(id); console.warn("thumb",id,e); cards.get("up:"+id)?.patch(); }
+    }
+  } finally{ thumbJobs.running=false; }
+}
+function queueThumbs(){
+  if(!canWrite||!libOpen()) return;
+  if(libTab==="base"){ for(const key of Object.keys(LIB)) if(!baseThumbSrc(key)&&!thumbJobs.baseQ.includes(key)) thumbJobs.baseQ.push(key); pumpBase(); }
+  else { for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
+}
+function cubeIcon(){
+  const s=document.createElementNS("http://www.w3.org/2000/svg","svg"); s.setAttribute("viewBox","0 0 24 24"); s.setAttribute("width","30"); s.setAttribute("height","30");
+  s.setAttribute("fill","none"); s.setAttribute("stroke","currentColor"); s.setAttribute("stroke-width","1.4"); s.setAttribute("stroke-linejoin","round"); s.setAttribute("aria-hidden","true");
+  const p=document.createElementNS("http://www.w3.org/2000/svg","path"); p.setAttribute("d","M12 2.5 21 7.5v9L12 21.5 3 16.5v-9zM3 7.5l9 5 9-5M12 12.5v9"); s.append(p); return s;
+}
+
+/* live hover preview: ONE card spins at a time, drawn by the shared thumbnail renderer into a 2D canvas */
+let hover=null;
+function stopSpin(){
+  if(!hover) return; const h=hover; hover=null; clearTimeout(h.timer); h.dead=true;
+  h.spin?.stop(); h.cv?.remove(); if(h.obj) Thumbs.disposeObject(h.obj);
+  h.box.classList.remove("spinning");
+}
+async function startSpin(box,make){
+  stopSpin(); const h=hover={box,dead:false};
+  try{
+    const obj=await make(); if(h.dead){ if(obj) Thumbs.disposeObject(obj); return; }
+    h.obj=obj; const cv=document.createElement("canvas"); cv.width=cv.height=Thumbs.SIZE; cv.className="spin"; box.append(cv); h.cv=cv;
+    h.spin=Thumbs.spin(obj,cv); box.classList.add("spinning");
+  }catch(e){ console.warn("spin",e); }
+}
+function bindSpin(root,box,make){
+  let t=0;
+  root.addEventListener("pointerenter",e=>{ if(e.pointerType==="mouse"){ clearTimeout(t); t=setTimeout(()=>startSpin(box,make),180); } });
+  root.addEventListener("pointerleave",e=>{ clearTimeout(t); if(e.pointerType==="mouse") stopSpin(); });
+  root.addEventListener("pointerdown",e=>{ if(e.pointerType==="touch"){ clearTimeout(t); t=setTimeout(()=>{ root.dataset.long="1"; startSpin(box,make); },450); } });
+  for(const ev of ["pointerup","pointercancel"]) root.addEventListener(ev,e=>{ if(e.pointerType==="touch"){ clearTimeout(t); stopSpin(); setTimeout(()=>{ delete root.dataset.long; },400); } });
+  root.addEventListener("contextmenu",e=>{ if(isTouch) e.preventDefault(); });
+  root.addEventListener("click",e=>{ if(root.dataset.long){ e.stopPropagation(); e.preventDefault(); } },true);
+}
+
+function placeholder(failed){
+  return el("div",{class:"ph"},cubeIcon(),el("span",{text:failed?"Нет превью":"Готовлю превью…"}));
+}
+/* one grid card. src() -> url | null, failed() -> bool, dims() -> [w,d,h] | null */
+function makeCard({id,kind,name,dims,extra,src,failed,onPlace,onInfo,build}){
+  const thumb=el("div",{class:"thumb"});
+  const main=el("button",{class:"card-main",title:"Поставить в сцену"},thumb,el("b",{class:"cn"}),el("span",{class:"mono cd"}),extra?el("span",{class:"mono ce"}):null);
+  const info=el("button",{class:"card-i ghost",text:"i",title:"Предпросмотр","aria-label":"Предпросмотр"});
+  const root=el("div",{class:"card"},main,info);
+  const patch=()=>{
+    const s=src(); main.querySelector(".cn").textContent=name();
+    main.querySelector(".cd").textContent=fmtDims(dims());
+    if(extra) main.querySelector(".ce").textContent=extra();
+    const cur=thumb.firstChild;
+    if(s){
+      if(cur&&cur.tagName==="IMG"&&cur.dataset.s===s) return;
+      thumb.querySelectorAll("img,.ph").forEach(n=>n.remove());
+      const im=el("img",{alt:"",width:Thumbs.SIZE,height:Thumbs.SIZE,loading:"lazy",decoding:"async",draggable:"false"}); im.dataset.s=s; im.src=s;
+      im.onerror=()=>{ if(im.dataset.s!==s||!im.isConnected) return; im.remove(); thumb.prepend(placeholder(true)); if(kind==="up"&&canWrite&&!thumbJobs.failed.has(id)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); pumpModels(); } };
+      thumb.prepend(im);
+    } else { thumb.querySelectorAll("img").forEach(n=>n.remove()); const f=failed(); const p=thumb.querySelector(".ph"); if(!p||p.dataset.f!==String(f)){ p?.remove(); const n=placeholder(f); n.dataset.f=String(f); thumb.prepend(n); } }
+  };
+  main.disabled=!canWrite; main.onclick=onPlace; info.onclick=onInfo;
+  bindSpin(root,thumb,build);
+  cards.set(kind+":"+id,{patch}); patch();
+  return root;
+}
+
+const modelThumbSrc=m=>m.thumb?"/uploads/"+m.thumb+"?t="+(m.thumbAt||0):null;
 function renderLib(){
-  const L=$("libList"); L.textContent="";
+  const L=$("libList"); stopSpin(); L.textContent=""; cards.clear();
   $("tBase").setAttribute("aria-pressed",libTab==="base"); $("tUp").setAttribute("aria-pressed",libTab==="up");
-  $("uploadRow").hidden=(libTab!=="up");
+  $("uploadRow").hidden=(libTab!=="up"); $("libSort").hidden=(libTab!=="up");
+  const q=libQuery.trim().toLowerCase(), hit=n=>!q||String(n).toLowerCase().includes(q);
   if(libTab==="base"){
     for(const[key,def]of Object.entries(LIB)){
-      const b=el("button",{class:"item-btn"},el("b",{text:def.name}),el("span",{class:"mono",text:def.size.join("×")}));
-      if(!canWrite) b.disabled=true;
-      b.onclick=()=>startPlacing({doc:{type:"builtin",key,color:def.color,r:0,s:1}});
-      L.append(b);
+      if(!hit(def.name)) continue;
+      L.append(makeCard({id:key,kind:"base",name:()=>def.name,dims:()=>dimsOfBase(key),src:()=>baseThumbSrc(key),failed:()=>false,
+        onPlace:()=>startPlacing({doc:{type:"builtin",key,color:def.color,r:0,s:1}}),onInfo:()=>openPreview({kind:"base",key}),
+        build:async()=>baseObject(key)}));
     }
+    if(!L.firstChild) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
   } else {
-    const list=[...models.entries()].sort((a,b)=>(b[1].at||0)-(a[1].at||0));
-    if(!list.length) L.append(el("div",{class:"meta",style:"grid-column:1/-1;padding:4px",text:"Пока ничего не загружено. Сгенерируйте мебель по фото в нейросети, скачайте .glb и загрузите сюда."}));
-    for(const[id,m]of list){
-      const b=el("button",{class:"item-btn"},el("b",{text:m.name||"Модель"}),el("span",{class:"mono",text:((m.sizeBytes||0)/1048576).toFixed(1)+" МБ"}));
-      if(!canWrite) b.disabled=true;
-      b.onclick=()=>startPlacing({doc:{type:"model",model:id,r:0,s:1}});
-      const x=el("button",{class:"ghost danger",text:"✕",title:"Удалить модель","aria-label":"Удалить модель "+(m.name||""),style:"padding:2px 6px;min-height:0"});
-      x.onclick=async()=>{ if(!x.dataset.arm){ x.dataset.arm="1"; x.textContent="Удалить?"; setTimeout(()=>{ x.dataset.arm=""; x.textContent="✕"; },3000); return; }
-        try{ await Sync.removeModel(id); }catch(e){ toast("Не удалось удалить модель."); } };
-      const cell=el("div",{style:"display:flex;flex-direction:column;gap:2px;min-width:0"},b,x);
-      L.append(cell);
+    const list=[...models.entries()].filter(([,m])=>hit(m.name||"Модель"));
+    list.sort(libSort==="name"?(a,b)=>String(a[1].name).localeCompare(String(b[1].name),"ru"):(a,b)=>(b[1].at||0)-(a[1].at||0));
+    if(!models.size) L.append(el("div",{class:"meta empty",text:"Пока ничего не загружено. Сгенерируйте мебель по фото в нейросети, скачайте .glb и загрузите сюда."}));
+    else if(!list.length) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
+    for(const[id]of list){
+      L.append(makeCard({id,kind:"up",name:()=>models.get(id)?.name||"Модель",dims:()=>models.get(id)?.dims||null,extra:()=>fmtSize(models.get(id)?.sizeBytes||0),
+        src:()=>{ const m=models.get(id); return m?modelThumbSrc(m):null; },failed:()=>thumbJobs.failed.has(id),
+        onPlace:()=>startPlacing({doc:{type:"model",model:id,r:0,s:1}}),onInfo:()=>openPreview({kind:"up",id}),
+        build:()=>{ const m=models.get(id); return m?loadFresh(m):null; }}));
     }
   }
   $("bUpload").hidden=!canWrite;
+  queueThumbs();
 }
 $("tBase").onclick=()=>{libTab="base";renderLib();};
 $("tUp").onclick=()=>{libTab="up";renderLib();};
-const toggleLib=()=>{ const c=$("lib").classList.toggle("collapsed"); $("bLib").setAttribute("aria-expanded",String(!c)); $("libClose").textContent=c?"+":"—"; };
+$("libSearch").oninput=e=>{ libQuery=e.target.value; renderLib(); };
+$("libSort").onchange=e=>{ libSort=e.target.value; renderLib(); };
+const toggleLib=()=>{ const c=$("lib").classList.toggle("collapsed"); $("bLib").setAttribute("aria-expanded",String(!c)); $("libClose").textContent=c?"+":"—"; if(c) stopSpin(); else renderLib(); };
 $("libClose").onclick=toggleLib; $("bLib").onclick=toggleLib;
 if(innerWidth<720) toggleLib();
+
+/* ---------------- preview window ---------------- */
+let pv=null;
+function closePreview(){
+  if(!pv) return; const p=pv; pv=null;
+  cancelAnimationFrame(p.raf); p.ro.disconnect(); p.controls.dispose(); p.st.remove();
+  if(p.obj) Thumbs.disposeObject(p.obj);
+  p.renderer.dispose(); p.renderer.forceContextLoss?.(); p.root.remove();
+  document.removeEventListener("keydown",p.onKey,true); p.opener?.focus?.();
+}
+async function openPreview(ref){
+  closePreview(); stopSpin();
+  const isBase=ref.kind==="base", cur=()=>isBase?null:models.get(ref.id);
+  if(!isBase&&!cur()) return;
+  const title=()=>isBase?LIB[ref.key].name:(cur()?.name||"Модель");
+  const dimsNow=()=>isBase?dimsOfBase(ref.key):(cur()?.dims||null);
+  const h2=el("h2",{id:"pvTitle",text:title()}), dimsEl=el("div",{class:"meta mono"}), msg=el("div",{class:"meta",role:"status"});
+  const view=el("div",{class:"pv-view"},el("div",{class:"pv-load",text:"Загружаю модель…"}));
+  const actions=el("div",{class:"row pv-actions"}), confirmRow=el("div",{class:"row pv-confirm",hidden:""}), headRow=el("div",{class:"pv-head"},h2);
+  const close=el("button",{class:"ghost",text:"✕","aria-label":"Закрыть",on:{click:closePreview}}); headRow.append(close);
+  const dlg=el("div",{class:"panel pv-dlg",role:"dialog","aria-modal":"true","aria-labelledby":"pvTitle"},headRow,view,
+    el("div",{class:"meta",text:"Крутите мышью или пальцем, колесо или щипок — масштаб."}),dimsEl,
+    isBase?null:el("div",{class:"meta mono",text:fmtSize(cur().sizeBytes||0)}),actions,confirmRow,msg);
+  const root=el("div",{id:"pv",class:"pv-back"},dlg); document.body.append(root);
+  root.addEventListener("pointerdown",e=>{ if(e.target===root) closePreview(); });
+  const upd=()=>{ if(!isBase&&!cur()){ closePreview(); toast("Модель удалена."); return; } h2.textContent=title(); dimsEl.textContent=fmtDims(dimsNow()); };
+  upd();
+
+  const place=el("button",{class:"primary",text:"Поставить в сцену"}); place.disabled=!canWrite;
+  place.onclick=()=>{ const doc=isBase?{type:"builtin",key:ref.key,color:LIB[ref.key].color,r:0,s:1}:{type:"model",model:ref.id,r:0,s:1}; closePreview(); startPlacing({doc}); };
+  actions.append(place);
+  const refresh=el("button",{text:"Обновить превью"});
+  refresh.onclick=async()=>{
+    refresh.disabled=true; msg.textContent="Перерисовываю…";
+    try{
+      if(isBase){ await makeBaseThumb(ref.key); cards.get("base:"+ref.key)?.patch(); }
+      else { thumbJobs.failed.delete(ref.id); await makeModelThumb(ref.id); }
+      msg.textContent="Превью обновлено.";
+    }catch(e){ console.warn(e); msg.textContent="Не получилось обновить превью."; }
+    refresh.disabled=false;
+  };
+  if(canWrite) actions.append(refresh);
+  if(canWrite&&!isBase){
+    const ren=el("button",{text:"Переименовать"}), del=el("button",{class:"danger",text:"Удалить"});
+    ren.onclick=()=>{
+      const inp=el("input",{type:"text",maxlength:"60","aria-label":"Новое название",class:"pv-name"}); inp.value=cur().name||"";
+      const ok=el("button",{class:"primary",text:"Сохранить"}), no=el("button",{class:"ghost",text:"Отмена"});
+      const back=()=>{ confirmRow.hidden=true; confirmRow.textContent=""; actions.hidden=false; };
+      const save=async()=>{ const n=inp.value.trim().slice(0,60); if(!n) return; ok.disabled=true;
+        try{ const r=await Sync.renameModel(ref.id,n); if(r?.doc) models.set(ref.id,r.doc); cards.get("up:"+ref.id)?.patch(); upd(); back(); }catch(e){ msg.textContent="Не удалось переименовать."; ok.disabled=false; } };
+      ok.onclick=save; no.onclick=back; inp.onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); save(); } };
+      actions.hidden=true; confirmRow.hidden=false; confirmRow.textContent=""; confirmRow.append(inp,ok,no); inp.focus(); inp.select();
+    };
+    del.onclick=()=>{
+      const yes=el("button",{class:"danger primary-danger",text:"Да, удалить"}), no=el("button",{class:"ghost",text:"Отмена"});
+      actions.hidden=true; confirmRow.hidden=false; confirmRow.textContent="";
+      confirmRow.append(el("span",{class:"pv-ask",text:"Удалить «"+title()+"»? Такие предметы пропадут и из сцены."}),yes,no); no.focus();
+      no.onclick=()=>{ confirmRow.hidden=true; confirmRow.textContent=""; actions.hidden=false; };
+      yes.onclick=async()=>{ yes.disabled=true; try{ await Sync.removeModel(ref.id); closePreview(); }catch(e){ msg.textContent="Не удалось удалить модель."; yes.disabled=false; } };
+    };
+    actions.append(ren,del);
+  }
+
+  /* own renderer, created on open and released on close */
+  const renderer=new THREE.WebGLRenderer({antialias:true,alpha:true}); renderer.setPixelRatio(Math.min(devicePixelRatio,2)); renderer.outputEncoding=THREE.sRGBEncoding; renderer.setClearColor(0,0);
+  const cam=new THREE.PerspectiveCamera(35,1,0.01,500);
+  const p=pv={root,renderer,controls:null,st:null,obj:null,raf:0,ro:null,opener:document.activeElement,cam};
+  p.upd=upd;
+  p.onKey=e=>{ if(e.key==="Escape"){ e.stopPropagation(); closePreview(); } else if(e.key!=="Tab"&&!e.target.closest?.("input")) e.stopPropagation(); }; // hotkeys of the scene stay silent while the window is open
+  document.addEventListener("keydown",p.onKey,true);
+  p.ro=new ResizeObserver(()=>{ const w=view.clientWidth,h=view.clientHeight; if(w&&h){ renderer.setSize(w,h,false); cam.aspect=w/h; cam.updateProjectionMatrix(); } });
+  const cv=renderer.domElement; cv.className="pv-cv"; cv.setAttribute("aria-label","3D-предпросмотр"); p.ro.observe(view);
+  p.controls=new THREE.OrbitControls(cam,cv); p.controls.enableDamping=true; p.controls.dampingFactor=0.08; p.controls.autoRotate=true; p.controls.autoRotateSpeed=1.2; p.controls.enablePan=false;
+  p.controls.addEventListener("start",()=>{ p.controls.autoRotate=false; });
+  (place.disabled?close:place).focus();
+  let obj;
+  try{ obj=isBase?baseObject(ref.key):await loadFresh(cur()); }
+  catch(e){ console.warn(e); if(pv===p) view.firstChild.textContent="Не удалось загрузить модель."; return; }
+  if(pv!==p){ Thumbs.disposeObject(obj); return; }
+  p.obj=obj; p.st=Thumbs.stage(obj);
+  dimsEl.textContent=fmtDims(dimsNow()||mmOf(p.st.size));
+  const r=Math.max(p.st.size.length()/2,0.05), c=p.st.center;
+  cam.position.set(c.x+r*2.6*Math.sin(0.61)*Math.cos(0.5),c.y+r*2.6*Math.sin(0.5),c.z+r*2.6*Math.cos(0.61)*Math.cos(0.5));
+  p.controls.target.copy(c); p.controls.minDistance=r*0.8; p.controls.maxDistance=r*8; cam.near=r/50; cam.far=r*40; cam.updateProjectionMatrix(); p.controls.update();
+  view.textContent=""; view.append(cv);
+  const w=view.clientWidth,h=view.clientHeight; renderer.setSize(w,h,false); cam.aspect=w/h; cam.updateProjectionMatrix();
+  const loop=()=>{ if(pv!==p) return; p.raf=requestAnimationFrame(loop); p.controls.update(); renderer.render(p.st.scene,cam); };
+  loop();
+}
 
 /* upload */
 $("bUpload").onclick=()=>$("fileIn").click();
@@ -634,10 +862,14 @@ $("fileIn").onchange=async()=>{
   try{
     toast("Загружаю «"+name+"»…");
     const buf=await f.arrayBuffer();
-    await new Promise((res,rej)=>loader.parse(buf,"",res,rej)); // validate
+    const gl=await new Promise((res,rej)=>loader.parse(buf,"",res,rej)); // validate
+    let thumb=null;
+    try{ const wrap=normalizeModel(gl.scene); try{ thumb=await Thumbs.renderThumb(wrap); } finally{ Thumbs.disposeObject(wrap); } }catch(e){ console.warn("thumb",e); Thumbs.disposeObject(gl.scene); }
     const r=await Sync.upload(f,name);
     if(r?.id&&r.doc) models.set(r.id,r.doc);
-    libTab="up"; renderLib(); toast("Готово. Нажмите на модель в списке, чтобы поставить.");
+    libTab="up"; renderLib();
+    if(r?.id&&thumb){ try{ const t=await Sync.uploadThumb(r.id,thumb.blob,mmOf(thumb.size)); if(t?.doc&&models.has(r.id)){ models.set(r.id,t.doc); cards.get("up:"+r.id)?.patch(); } }catch(e){ console.warn("thumb upload",e); } }
+    toast("Готово. Нажмите на модель в списке, чтобы поставить.");
   }catch(e){
     const code=e&&e.code;
     toast(code==="too_large"?"Файл слишком большой.":code==="forbidden"?"Загружать модели может только редактор.":code==="too_many_models"?"Слишком много моделей. Удалите ненужные.":"Не получилось загрузить: файл повреждён или это не .glb.");
@@ -648,10 +880,8 @@ function loadModel(id){
   if(modelCache.has(id)) return modelCache.get(id);
   const m=models.get(id); if(!m) return Promise.resolve(null);
   const p=new Promise((res,rej)=>loader.load("/uploads/"+m.file,g=>{
-      const root=g.scene; const bb=new THREE.Box3().setFromObject(root), sz=new THREE.Vector3(), c=new THREE.Vector3(); bb.getSize(sz); bb.getCenter(c);
-      let k=1; const mx=Math.max(sz.x,sz.y,sz.z); if(mx>60) k=0.001; else if(mx>6) k=0.01; // мм / см → м
-      const wrap=new THREE.Group(); root.position.set(-c.x,-bb.min.y,-c.z); const inner=new THREE.Group(); inner.add(root); inner.scale.setScalar(k); wrap.add(inner);
-      root.traverse(o=>{ if(o.isMesh){ o.castShadow=o.receiveShadow=true; } });
+      const wrap=normalizeModel(g.scene);
+      wrap.traverse(o=>{ if(o.isMesh){ o.castShadow=o.receiveShadow=true; } });
       res(wrap);
     },undefined,rej)).catch(e=>{ console.warn(e); const g=new THREE.Group(); bx(g,.5,.5,.5,0,.25,0,mat("#c9c3b6")); return g; });
   modelCache.set(id,p); return p;
@@ -868,7 +1098,7 @@ function applyState(s){
   for(const id of [...items.keys()]) if(!ids.has(id)) dropItem(id);
   for(const[id,v]of Object.entries(s.items||{})) if(validItem(v)) syncItem(id,v);
   Picker.setProject(s.swatches?.colors||[],canWrite);
-  applyAllPaint(); renderCtx(true); renderLib(); renderTools();
+  applyAllPaint(); renderCtx(true); renderLib(); renderTools(); pv?.upd();
 }
 /* ---------------- house model update (editor) ---------------- */
 const HOUSE_ERR={forbidden:"Менять модель дома может только редактор.",too_large:"Файл больше 30 МБ. Уменьшите модель (например, в Blender) и попробуйте снова.",
@@ -938,7 +1168,8 @@ function boot(){
   Sync.on("item.set",m=>{ if(validItem(m.doc)) syncItem(m.id,m.doc); });
   Sync.on("item.delete",m=>dropItem(m.id));
   Sync.on("model.added",m=>{ if(validModel(m.doc)){ models.set(m.id,m.doc); renderLib(); } });
-  Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); renderLib(); });
+  Sync.on("model.updated",m=>{ if(validModel(m.doc)&&models.has(m.id)){ models.set(m.id,m.doc); cards.get("up:"+m.id)?.patch(); pv?.upd(); } });
+  Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); renderLib(); pv?.upd(); });
   Sync.on("house.updated",m=>onHouseVersion(m.v,true));
   Sync.on("swatches.set",m=>Picker.setProject(m.doc?.colors||[]));
   const go=()=>Sync.connect();
@@ -946,7 +1177,8 @@ function boot(){
   else askName("Как вас зовут?","",false).then(n=>{ Sync.setName(n); go(); });
 }
 /* read-only snapshot for the Playwright test (tests/house.e2e.js) */
-window.__villa=()=>({houseV,shownV,mode,items:items.size,geoms:renderer.info.memory.geometries,walkY:walk.pos.y,
+window.__villa=()=>({preview:pv?{az:pv.controls.getAzimuthalAngle(),polar:pv.controls.getPolarAngle(),loaded:!!pv.obj}:null,
+  cards:[...cards.keys()],houseV,shownV,mode,items:items.size,geoms:renderer.info.memory.geometries,walkY:walk.pos.y,
   colors:Object.fromEntries([...materials].map(([n,m])=>[n,hexOf(m.mat.color)])),ownCount:meshes.filter(o=>o.userData.ownMat).length});
 boot();
 updateHint(); renderLib(); renderTools();
