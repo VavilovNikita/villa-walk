@@ -4,7 +4,8 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "house:reload": "node scripts/house-reload.js"
   },
   "keywords": [],
   "author": "",
@@ -16,5 +17,8 @@
     "fastify": "^5.12.7",
     "three": "^0.128.0",
     "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.64.1"
   }
 }

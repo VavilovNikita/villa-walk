@@ -13,8 +13,6 @@ if (EDIT_KEY.length < 16) { console.error("EDIT_KEY is missing or too short (set
 const MAX_PEERS = 40, MAX_MODEL_BYTES = 30 * 1024 * 1024, MAX_ITEMS = 3000, MAX_MODELS = 300;
 const UPLOADS = path.join(DATA_DIR, "uploads"), MODELS = path.join(DATA_DIR, "models");
 fs.mkdirSync(UPLOADS, { recursive: true }); fs.mkdirSync(MODELS, { recursive: true });
-const seed = path.join(__dirname, "..", "seed", "villa.glb");
-if (!fs.existsSync(path.join(MODELS, "villa.glb")) && fs.existsSync(seed)) fs.copyFileSync(seed, path.join(MODELS, "villa.glb"));
 
 /* ---------------- storage ---------------- */
 const db = new (require("better-sqlite3"))(path.join(DATA_DIR, "villa.db"));
@@ -30,6 +28,10 @@ const q = {
 const getDoc = (c, id) => { const r = q.get.get(c, id); return r ? JSON.parse(r.data) : null; };
 const putDoc = (c, id, d) => q.put.run(c, id, JSON.stringify(d));
 const collection = c => Object.fromEntries(q.all.all(c).map(r => [r.id, JSON.parse(r.data)]));
+
+const house = require("./house").createHouse({
+  modelsDir: MODELS, seedFile: path.join(__dirname, "..", "seed", "villa.glb"), getDoc, putDoc, broadcast: m => broadcast(m),
+});
 
 /* ---------------- validation ---------------- */
 const HEX = /^#[0-9a-f]{6}$/;
@@ -107,9 +109,48 @@ app.register(require("@fastify/static"), { root: UPLOADS, prefix: "/uploads/", d
 app.register(require("@fastify/static"), { root: MODELS, prefix: "/models/", decorateReply: false, cacheControl: false, index: false, dotfiles: "deny" });
 app.register(require("@fastify/multipart"), { limits: { fileSize: MAX_MODEL_BYTES, files: 1, fields: 4, fieldSize: 1024 } });
 
-const snapshot = () => ({ paint: collection("paint"), parts: collection("parts"), items: collection("items"), models: collection("models"), swatches: getDoc("swatches", "project") || { colors: [] } });
+const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: collection("items"), models: collection("models"), swatches: getDoc("swatches", "project") || { colors: [] } });
 app.get("/api/state", async (req, reply) => { reply.header("Cache-Control", "no-store"); return snapshot(); });
 app.get("/api/health", async () => ({ ok: true, peers: peers.size }));
+
+/* ---- house model (villa.glb) ---- */
+const forbidden = (req, reply) => { if (keyOk(req.headers["x-edit-key"])) return false; reply.code(403).send({ error: "forbidden" }); return true; };
+app.get("/api/house", async (req, reply) => {
+  reply.header("Cache-Control", "no-store");
+  const out = { v: house.meta.v, at: house.meta.at };
+  if (keyOk(req.headers["x-edit-key"])) out.history = house.history();
+  return out;
+});
+app.post("/api/house", async (req, reply) => {
+  if (forbidden(req, reply)) return;
+  const part = await req.file();
+  if (!part) return reply.code(400).send({ error: "no_file" });
+  const tmp = house.tmpName();
+  try {
+    await pipeline(part.file, fs.createWriteStream(tmp));
+    if (part.file.truncated) { fs.rmSync(tmp, { force: true }); return reply.code(413).send({ error: "too_large" }); }
+    if (!house.validate(tmp)) { fs.rmSync(tmp, { force: true }); return reply.code(400).send({ error: "not_glb" }); }
+    const m = house.install(tmp);
+    return { ok: true, v: m.v, at: m.at };
+  } catch (e) {
+    fs.rmSync(tmp, { force: true });
+    req.log.warn(e);
+    return reply.code(e.code === "FST_REQ_FILE_TOO_LARGE" ? 413 : 400).send({ error: "upload_failed" });
+  }
+});
+app.post("/api/house/restore", async (req, reply) => {
+  if (forbidden(req, reply)) return;
+  const m = house.restore(req.body && req.body.name);
+  if (!m) return reply.code(404).send({ error: "not_found" });
+  return { ok: true, v: m.v, at: m.at };
+});
+/* used by scripts/house-reload.js: announce a villa.glb that was put into the volume by hand */
+app.post("/api/house/reload", async (req, reply) => {
+  if (forbidden(req, reply)) return;
+  const r = house.reload(req.body && req.body.from);
+  if (r.error) return reply.code(400).send({ error: r.error });
+  return { ok: true, v: r.meta.v, at: r.meta.at };
+});
 
 app.post("/api/models", async (req, reply) => {
   if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });

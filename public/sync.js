@@ -75,14 +75,26 @@ S.setSwatches=colors=>send({t:"swatches.set",colors});
 S.commitItem=(id,doc)=>send({t:"item.set",id,doc});
 S.removeItem=id=>send({t:"item.delete",id});
 
-async function api(method,url,body){
-  const r=await fetch(url,{method,body,headers:{"x-edit-key":key,"x-uid":profile.uid}});
+async function api(method,url,body,extra){
+  const r=await fetch(url,{method,body,headers:Object.assign({"x-edit-key":key,"x-uid":profile.uid},extra)});
   const j=await r.json().catch(()=>({}));
   if(!r.ok){ const e=new Error(j.error||("http "+r.status)); e.code=j.error||String(r.status); throw e; }
   return j;
 }
 S.upload=(file,name)=>{ const fd=new FormData(); fd.append("name",name); fd.append("file",file,file.name); return api("POST","/api/models",fd); };
 S.removeModel=id=>api("DELETE","/api/models/"+encodeURIComponent(id));
+
+S.houseInfo=async()=>{ const r=await fetch("/api/house",{cache:"no-store",headers:{"x-edit-key":key}}); if(!r.ok) throw new Error("http "+r.status); return r.json(); };
+S.restoreHouse=name=>api("POST","/api/house/restore",JSON.stringify({name}),{"content-type":"application/json"});
+/* XHR instead of fetch: only it reports upload progress */
+S.uploadHouse=(file,onProgress)=>new Promise((res,rej)=>{
+  const fd=new FormData(); fd.append("file",file,file.name);
+  const x=new XMLHttpRequest(); x.open("POST","/api/house"); x.setRequestHeader("x-edit-key",key); x.responseType="json";
+  x.upload.onprogress=e=>{ if(e.lengthComputable&&onProgress) onProgress(e.loaded/e.total); };
+  x.onload=()=>{ const j=x.response||{}; if(x.status>=200&&x.status<300) res(j); else { const e=new Error(j.error||("http "+x.status)); e.code=j.error||String(x.status); rej(e); } };
+  x.onerror=()=>{ const e=new Error("network"); e.code="network"; rej(e); };
+  x.send(fd);
+});
 
 window.Sync=S;
 })();

@@ -117,24 +117,95 @@ function applyFinish(m,finish,o){
 
 /* ---------------- load house ---------------- */
 const loader=new THREE.GLTFLoader();
-loader.load("/models/villa.glb",gltf=>{
-  house=gltf.scene; scene.add(house);
-  house.traverse(o=>{
+let houseV=null;             // version requested last (newest wins)
+let houseShown=false;        // first model is on screen
+let shownV=null;             // version of the model that is on screen
+const loadGltf=url=>new Promise((res,rej)=>loader.load(url,res,undefined,rej));
+
+/* walks a scene and builds everything that depends on the house: materials, collision / floor lists, roof parts */
+function indexHouse(root){
+  const idx={materials:new Map(),meshes:[],solids:[],floorsAll:[],roofParts:[]};
+  root.traverse(o=>{
     if(!o.isMesh) return;
     const m=o.material, name=m.name||"Без названия";
-    if(!materials.has(name)) materials.set(name,{mat:m,orig:hexOf(m.color),o:{r:m.roughness,m:m.metalness}});
+    if(!idx.materials.has(name)) idx.materials.set(name,{mat:m,orig:hexOf(m.color),o:{r:m.roughness,m:m.metalness}});
     if(m.transparent){ m.depthWrite=false; o.renderOrder=2; }
     o.castShadow=!m.transparent; o.receiveShadow=true;
-    o.userData.matName=name; o.userData.baseMat=m; meshes.push(o);
-    if(!PASS.has(name)) solids.push(o);
-    if(!["Стекло","Стекло — матовая полоса","Навес — стекло","Растения"].includes(name)) floorsAll.push(o);
+    o.userData.matName=name; o.userData.baseMat=m; idx.meshes.push(o);
+    if(!PASS.has(name)) idx.solids.push(o);
+    if(!["Стекло","Стекло — матовая полоса","Навес — стекло","Растения"].includes(name)) idx.floorsAll.push(o);
     const bb=new THREE.Box3().setFromObject(o);
-    if(bb.min.y>2.12 && !/^Сала/.test(o.name) && name!=="Море") roofParts.push(o);
+    if(bb.min.y>2.12 && !/^Сала/.test(o.name) && name!=="Море") idx.roofParts.push(o);
   });
-  applyRoof(); applyAllPaint();
-  $("loading").remove();
-  setMode("orbit",true);
-},undefined,err=>{ $("loading").textContent="Не удалось загрузить модель. Обновите страницу."; console.error(err); });
+  return idx;
+}
+function disposeHouse(root){
+  root.traverse(o=>{
+    if(!o.isMesh) return;
+    o.geometry&&o.geometry.dispose();
+    for(const m of new Set([o.material,o.userData.baseMat,o.userData.ownMat])){
+      if(!m) continue;
+      for(const[k,v]of Object.entries(m)) if(k!=="envMap"&&v&&v.isTexture) v.dispose(); // envMap is the shared studio reflection
+      m.dispose();
+    }
+  });
+}
+/* paint / parts docs stay in the database even if the new model has no such material or piece; they are just not applied */
+function reportOrphans(){
+  const names=new Set(materials.keys()), pieces=new Set(), groups=new Set();
+  for(const o of meshes){ pieces.add(o.name); groups.add(groupOf(o)); }
+  const lost=[];
+  for(const d of paint.values()) if(!names.has(d.name)) lost.push("материал «"+d.name+"»");
+  for(const d of parts.values()){
+    const k=String(d.key||""), n=k.slice(k.indexOf(":")+1);
+    if(k.startsWith("piece:")?!pieces.has(n):k.startsWith("group:")?!groups.has(n):false) lost.push((k.startsWith("piece:")?"деталь «":"группа «")+n+"»");
+  }
+  if(lost.length) console.warn("Перекраски без материала или детали в новой модели (в базе сохранены, не применяются): "+lost.length+"\n"+lost.join("\n"));
+}
+/* floor under the walker after the model changed: lift out of a new wall/slab to the nearest floor at the same x,z */
+function rescueWalker(){
+  if(mode!=="walk") return;
+  const feet=walk.pos.y-EYE;
+  ray.set(new THREE.Vector3(walk.pos.x,feet+6,walk.pos.z),new THREE.Vector3(0,-1,0)); ray.far=14;
+  const hits=ray.intersectObjects(floorsAll,false).filter(h=>h.face&&h.face.normal.y>0.5);
+  if(!hits.length) return;
+  const best=hits.reduce((a,b)=>Math.abs(b.point.y-feet)<Math.abs(a.point.y-feet)?b:a);
+  if(Math.abs(best.point.y-feet)>0.02) walk.pos.y=best.point.y+EYE;
+}
+function installHouse(gltf,v,isUpdate){
+  const old=house, idx=indexHouse(gltf.scene); shownV=v;
+  house=gltf.scene; scene.add(house);
+  materials.clear(); for(const[k,m]of idx.materials) materials.set(k,m);
+  for(const [arr,src] of [[meshes,idx.meshes],[solids,idx.solids],[floorsAll,idx.floorsAll],[roofParts,idx.roofParts]]){ arr.length=0; arr.push(...src); }
+  if(old){ scene.remove(old); disposeHouse(old); }
+  applyRoof(); applyAllPaint(); reportOrphans();
+  if(selected?.kind==="mat"){
+    const mesh=meshes.find(o=>o.name===selected.mesh?.name&&o.userData.matName===selected.name)||meshes.find(o=>o.userData.matName===selected.name);
+    if(mesh) selected.mesh=mesh; else select(null);
+  }
+  renderCtx(true);
+  rescueWalker();
+  if(!houseShown){ houseShown=true; $("loading")?.remove(); setMode("orbit",true); }
+  if(isUpdate) toast("Модель дома обновлена");
+}
+async function loadHouse(v,isUpdate){
+  houseV=v;
+  try{
+    const gltf=await loadGltf("/models/villa.glb"+(v?"?v="+v:""));
+    if(houseV!==v){ disposeHouse(gltf.scene); return; } // a newer version was requested meanwhile
+    installHouse(gltf,v,isUpdate);
+  }catch(err){
+    console.error(err);
+    if(!houseShown) $("loading").textContent="Не удалось загрузить модель. Обновите страницу.";
+    else toast("Не удалось загрузить новую модель дома. Обновите страницу.");
+  }
+}
+function onHouseVersion(v,isUpdate){ if(canWrite&&!$("houseHist").hidden&&Number.isInteger(v)) setTimeout(renderHist,300); if(Number.isInteger(v)&&v!==houseV&&(houseV===null||v>houseV)) loadHouse(v,isUpdate); }
+(async()=>{
+  let v=null;
+  try{ const r=await fetch("/api/house",{cache:"no-store"}); if(r.ok) v=(await r.json()).v; }catch{}
+  if(houseV===null) loadHouse(Number.isInteger(v)?v:0,false);
+})();
 
 /* ---------------- controls ---------------- */
 const orbit=new THREE.OrbitControls(camera,renderer.domElement);
@@ -789,6 +860,7 @@ function validPaint(v){ return v&&typeof v.name==="string"&&HEXRE.test(v.color||
 function validItem(v){ return v&&(v.type==="builtin"||v.type==="model"); }
 function validModel(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}\.glb$/.test(v.file); }
 function applyState(s){
+  if(s.house) onHouseVersion(s.house.v,houseShown);
   paint.clear(); for(const[k,v]of Object.entries(s.paint||{})) if(validPaint(v)) paint.set(k,v);
   parts.clear(); for(const[k,v]of Object.entries(s.parts||{})) if(HEXRE.test(v?.color||"")&&typeof v.key==="string") parts.set(k,v);
   models.clear(); modelCache.clear(); for(const[k,v]of Object.entries(s.models||{})) if(validModel(v)) models.set(k,v);
@@ -798,7 +870,54 @@ function applyState(s){
   Picker.setProject(s.swatches?.colors||[],canWrite);
   applyAllPaint(); renderCtx(true); renderLib(); renderTools();
 }
+/* ---------------- house model update (editor) ---------------- */
+const HOUSE_ERR={forbidden:"Менять модель дома может только редактор.",too_large:"Файл больше 30 МБ. Уменьшите модель (например, в Blender) и попробуйте снова.",
+  not_glb:"Это не подходящий файл: нужен целый .glb (glTF 2.0).",network:"Нет связи с сервером. Проверьте интернет и повторите.",not_found:"Эта версия больше недоступна.",upload_failed:"Не удалось загрузить файл. Попробуйте ещё раз."};
+const houseErr=e=>HOUSE_ERR[e&&e.code]||"Не удалось обновить модель дома ("+((e&&e.message)||"ошибка")+").";
+function houseProgress(txt,frac){ const b=$("houseUp"); b.hidden=!txt; if(!txt) return; $("houseUpTxt").textContent=txt; const p=$("houseUpBar"); p.hidden=frac==null; if(frac!=null) p.value=Math.round(frac*100); }
+$("bHouse").onclick=()=>{ if(canWrite) $("houseIn").click(); };
+$("houseIn").onchange=async e=>{
+  const f=e.target.files[0]; e.target.value=""; if(!f) return;
+  if(!/\.glb$/i.test(f.name)){ toast("Нужен файл в формате .glb"); return; }
+  if(f.size>30*1048576){ toast(HOUSE_ERR.too_large); return; }
+  if(!confirm("Заменить модель дома для всех участников? Предыдущая версия сохранится в истории.")) return;
+  $("bHouse").disabled=true;
+  try{
+    houseProgress("Проверяю файл…");
+    const buf=await f.arrayBuffer(), head=new Uint8Array(buf,0,Math.min(12,buf.byteLength));
+    if(String.fromCharCode(...head.slice(0,4))!=="glTF") throw Object.assign(new Error("not_glb"),{code:"not_glb"});
+    const gl=await new Promise((res,rej)=>loader.parse(buf,"",res,rej)); disposeHouse(gl.scene); // must parse, otherwise nobody gets it
+    houseProgress("Загружаю на сервер… 0%",0);
+    await Sync.uploadHouse(f,fr=>houseProgress("Загружаю на сервер… "+Math.round(fr*100)+"%",fr));
+    houseProgress("");
+    if(!$("houseHist").hidden) renderHist();
+  }catch(err){ houseProgress(""); toast(houseErr(err)); console.warn(err); }
+  finally{ $("bHouse").disabled=false; }
+};
+function fmtDate(t){ return new Date(t).toLocaleString("ru-RU",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}); }
+async function renderHist(){
+  const box=$("houseHist"); box.hidden=false; $("bHist").setAttribute("aria-expanded","true");
+  box.textContent=""; box.append(el("span",{class:"label",text:"История версий модели дома"}),el("span",{class:"meta",text:"Загружаю…"}));
+  let info; try{ info=await Sync.houseInfo(); }catch(e){ box.textContent=""; box.append(el("span",{class:"meta",text:"Не удалось получить историю."}),el("button",{class:"ghost",text:"Закрыть",on:{click:closeHist}})); return; }
+  box.textContent=""; box.append(el("span",{class:"label",text:"История версий модели дома"}),
+    el("div",{class:"meta mono",text:"Сейчас: версия "+info.v+", "+fmtDate(info.at)}));
+  const h=info.history||[];
+  if(!h.length) box.append(el("span",{class:"meta",text:"Пока нет прошлых версий."}));
+  for(const x of h){
+    box.append(el("div",{class:"hrow"},el("span",{class:"mono",text:fmtDate(x.at)+" · "+(x.size/1048576).toFixed(1)+" МБ"}),
+      el("button",{text:"Вернуть",on:{click:async ev=>{
+        if(!confirm("Вернуть версию от "+fmtDate(x.at)+"? Текущая сохранится в истории.")) return;
+        ev.target.disabled=true;
+        try{ await Sync.restoreHouse(x.name); renderHist(); }catch(err){ toast(houseErr(err)); ev.target.disabled=false; }
+      }}})));
+  }
+  box.append(el("button",{class:"ghost",text:"Закрыть",on:{click:closeHist}}));
+}
+function closeHist(){ $("houseHist").hidden=true; $("bHist").setAttribute("aria-expanded","false"); }
+$("bHist").onclick=()=>{ if(!canWrite) return; if($("houseHist").hidden) renderHist(); else closeHist(); };
+
 function applyRole(){
+  $("bHouse").hidden=!canWrite; $("bHist").hidden=!canWrite; if(!canWrite) closeHist();
   $("lib").hidden=!canWrite; $("bLib").hidden=!canWrite; $("viewBadge").hidden=canWrite;
   Picker.setProject(Picker.project,canWrite);
   renderLib(); renderTools(); renderCtx();
@@ -820,11 +939,15 @@ function boot(){
   Sync.on("item.delete",m=>dropItem(m.id));
   Sync.on("model.added",m=>{ if(validModel(m.doc)){ models.set(m.id,m.doc); renderLib(); } });
   Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); renderLib(); });
+  Sync.on("house.updated",m=>onHouseVersion(m.v,true));
   Sync.on("swatches.set",m=>Picker.setProject(m.doc?.colors||[]));
   const go=()=>Sync.connect();
   if(Sync.profile.name) go();
   else askName("Как вас зовут?","",false).then(n=>{ Sync.setName(n); go(); });
 }
+/* read-only snapshot for the Playwright test (tests/house.e2e.js) */
+window.__villa=()=>({houseV,shownV,mode,items:items.size,geoms:renderer.info.memory.geometries,walkY:walk.pos.y,
+  colors:Object.fromEntries([...materials].map(([n,m])=>[n,hexOf(m.mat.color)])),ownCount:meshes.filter(o=>o.userData.ownMat).length});
 boot();
 updateHint(); renderLib(); renderTools();
 })();

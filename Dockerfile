@@ -5,6 +5,7 @@ RUN npm ci --omit=dev || (apt-get update && apt-get install -y --no-install-reco
 COPY server ./server
 COPY public ./public
 COPY seed ./seed
+COPY scripts ./scripts
 ENV NODE_ENV=production PORT=3000 DATA_DIR=/data
 USER node
 EXPOSE 3000
