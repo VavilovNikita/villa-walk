@@ -1,0 +1,20 @@
+{
+  "name": "villa-walk",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@fastify/multipart": "^10.1.6",
+    "@fastify/static": "^10.1.7",
+    "better-sqlite3": "^11.10.0",
+    "fastify": "^5.12.7",
+    "three": "^0.128.0",
+    "ws": "^8.22.0"
+  }
+}

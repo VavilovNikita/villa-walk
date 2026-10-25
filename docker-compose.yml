@@ -1,0 +1,15 @@
+services:
+  villa-walk:
+    build: .
+    image: villa-walk:latest
+    container_name: villa-walk
+    restart: unless-stopped
+    user: "1000:1000"
+    env_file: .env
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+    ports:
+      - "127.0.0.1:3100:3000"
+    volumes:
+      - /srv/villa-walk/data:/data
