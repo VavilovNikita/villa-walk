@@ -4,8 +4,9 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "house:reload": "node scripts/house-reload.js"
+    "test": "node tests/house.e2e.js && node tests/thumbs.e2e.js && node tests/tex.e2e.js",
+    "house:reload": "node scripts/house-reload.js",
+    "dev": "node --watch --env-file=.env.local server/index.js"
   },
   "keywords": [],
   "author": "",
@@ -15,6 +16,7 @@
     "@fastify/static": "^10.1.7",
     "better-sqlite3": "^11.10.0",
     "fastify": "^5.12.7",
+    "sharp": "^0.35.5",
     "three": "^0.128.0",
     "ws": "^8.22.0"
   },

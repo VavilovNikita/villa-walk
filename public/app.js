@@ -51,6 +51,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio,2));
 renderer.outputEncoding=THREE.sRGBEncoding;
 renderer.shadowMap.enabled=true; renderer.shadowMap.type=THREE.PCFSoftShadowMap;
 stage.appendChild(renderer.domElement); renderer.domElement.tabIndex=0;
+Tex.init(renderer,isTouch);
 const scene=new THREE.Scene();
 scene.background=new THREE.Color("#bcd6e8").convertSRGBToLinear();
 scene.fog=new THREE.Fog(scene.background, 60, 220);
@@ -77,6 +78,9 @@ const models=new Map();      // id -> doc
 const modelCache=new Map();  // id -> Promise<Group>
 const paint=new Map();       // keyOf(name) -> doc
 const parts=new Map();       // partDocId(key) -> doc
+const texItems=new Set();    // item holders whose textured materials follow the item (triplanar frame is the item's own)
+const houseTex=new Map();    // look signature -> textured copy of a house material, shared by every mesh with that look
+let libVer=0;                // bumped when the texture library changes: panels that list it re-render
 let mode="orbit", roofShown=false, selected=null, placing=null, canWrite=false;
 let myId=null, myColor="#2f6f62";
 let libTab="base";
@@ -145,7 +149,7 @@ function disposeHouse(root){
     o.geometry&&o.geometry.dispose();
     for(const m of new Set([o.material,o.userData.baseMat,o.userData.ownMat])){
       if(!m) continue;
-      for(const[k,v]of Object.entries(m)) if(k!=="envMap"&&v&&v.isTexture) v.dispose(); // envMap is the shared studio reflection
+      for(const[k,v]of Object.entries(m)) if(k!=="envMap"&&!(k==="map"&&m.userData&&m.userData.texShared)&&v&&v.isTexture) v.dispose(); // envMap is the shared studio reflection; a texture map is shared via Tex
       m.dispose();
     }
   });
@@ -258,7 +262,8 @@ addEventListener("keydown",e=>{
   if(c==="KeyQ") setTool("paint");
   else if(c==="KeyE") setTool("add");
   else if(c==="KeyG") grab();
-  else if(c==="KeyR") rotateTarget(e.shiftKey?-1:1);
+  else if(c==="KeyT") setTool("tex");
+  else if(c==="KeyR"){ if(tool==="tex"&&!placing) rotTexBrush(); else rotateTarget(e.shiftKey?-1:1); }
   else if(c==="KeyX"||c==="Delete"){ e.preventDefault(); deleteTarget(); }
   else if(c==="KeyC") pipette();
   else if(c==="KeyV") cycleScope();
@@ -331,7 +336,12 @@ renderer.domElement.addEventListener("pointerup",e=>{
   if(locked && selected) document.exitPointerLock();
 });
 document.addEventListener("pointerlockchange",()=>{ updateHint(); });
-renderer.domElement.addEventListener("wheel",e=>{ if(mode==="walk"&&(tool==="paint"||tool==="add")){ e.preventDefault(); cycle(e.deltaY>0?1:-1); } },{passive:false});
+/* capture phase: Shift+wheel with the texture brush must not also zoom the orbit camera (OrbitControls listens on the same element) */
+renderer.domElement.addEventListener("wheel",e=>{
+  const dy=e.deltaY||e.deltaX;
+  if(tool==="tex"&&e.shiftKey){ e.preventDefault(); e.stopImmediatePropagation(); scaleTex(dy<0?1.1:1/1.1); return; }
+  if(mode==="walk"&&(tool==="paint"||tool==="add"||tool==="tex")){ e.preventDefault(); cycle(dy>0?1:-1); }
+},{passive:false,capture:true});
 function look(dx,dy){ walk.yaw-=dx*0.0025; walk.pitch=Math.max(-1.45,Math.min(1.45,walk.pitch-dy*0.0025)); }
 const r2=v=>Math.round(v*1000)/1000;
 
@@ -371,6 +381,7 @@ function tick(){
   }
   if(mode==="orbit" && orbitMoved()) sendPresence();
   renderPeers();
+  for(const h of texItems) for(const m of h.texMats) Tex.setSpace(m,h.obj);
   renderer.render(scene,camera);
   requestAnimationFrame(tick);
 }
@@ -406,14 +417,78 @@ function el(tag,attrs={},...kids){ const e=document.createElement(tag); for(cons
 /* paint targets: a whole material, one wall (group of meshes) or a single mesh */
 const SCOPES=[["all","Все такие"],["group","Эта стена"],["piece","Этот кусок"]];
 function targetFor(sc,mesh,name){
-  if(sc==="group"&&mesh) return {scope:"group",key:"group:"+groupOf(mesh),label:groupOf(mesh).replace(/_/g," "),name};
-  if(sc==="piece"&&mesh) return {scope:"piece",key:"piece:"+mesh.name,label:mesh.name.replace(/_/g," "),name};
-  return {scope:"all",name,label:name};
+  if(sc==="group"&&mesh) return {scope:"group",key:"group:"+groupOf(mesh),label:groupOf(mesh).replace(/_/g," "),name,mesh};
+  if(sc==="piece"&&mesh) return {scope:"piece",key:"piece:"+mesh.name,label:mesh.name.replace(/_/g," "),name,mesh};
+  return {scope:"all",name,label:name,mesh};
 }
 const targetDoc=t=>t.scope==="all"?paint.get(keyOf(t.name)):parts.get(partDocId(t.key));
-const snap=t=>{ const d=targetDoc(t); return d?{color:d.color,finish:d.finish||null}:null; };
+const snap=t=>{ const d=targetDoc(t); return d?{color:d.color,finish:d.finish||null,tex:d.tex||null}:null; };
 function sendOk(ok){ if(!ok) toast("Нет связи: изменение не сохранится."); }
 let fromPicker=false;
+function partsByKey(){ const m=new Map(); for(const d of parts.values()) m.set(d.key,d); return m; }
+/* what a mesh looks like right now: a piece / wall override replaces the whole-material look, otherwise the material's own */
+function lookOf(mesh){
+  const name=mesh.userData.matName, mi=materials.get(name), all=paint.get(keyOf(name)), by=partsByKey(), part=by.get("piece:"+mesh.name)||by.get("group:"+groupOf(mesh)), d=part||all;
+  return {color:d?.color||mi?.orig||"#ffffff",finish:(part?(part.finish||all?.finish):all?.finish)||null,tex:d?.tex||null};
+}
+
+/* ---------------- texture picking UI (shared by surfaces and furniture) ---------------- */
+let ctxTab="color";          // "color" | "tex": the tab of the surface / furniture panel
+let texQuery="";
+const sameSrc=(a,b)=>!!a&&!!b&&(a.id?a.id===b.id:(!b.id&&a.builtin===b.builtin));
+const srcOf=t=>t.id?{id:t.id}:{builtin:t.builtin};
+const clampMm=v=>Math.min(20000,Math.max(5,Math.round(v)));
+function texList(){
+  return [...Tex.builtinKeys.map(k=>({builtin:k})),...[...Tex.library.entries()].sort((a,b)=>(b[1].at||0)-(a[1].at||0)).map(([id])=>({id}))];
+}
+function texCard(src,{pressed,onClick,onInfo}){
+  const s=Tex.defaultSize(src), tt=el("span",{class:"tt"}), u=Tex.thumbOf(src); if(u) tt.style.backgroundImage="url("+u+")";
+  const b=el("button",{class:"tcard","aria-pressed":String(!!pressed),title:Tex.nameOf(src)},tt,el("span",{class:"cn",text:Tex.nameOf(src)}),el("span",{class:"mono cd",text:s[0]+"×"+s[1]+" мм"}));
+  b.dataset.k=Tex.srcKey(src); b.addEventListener("click",onClick);
+  const root=el("div",{class:"card"},b);
+  if(onInfo) root.append(el("button",{class:"card-i ghost",text:"i",title:"О текстуре","aria-label":"О текстуре",on:{click:onInfo}}));
+  return root;
+}
+/* o: {what, get() -> tex|null, finish() -> finish|null, apply(texOrNull, final, finish?, undoKey?)}.
+   `final` = a finished gesture (saved and undoable), otherwise a live preview that is neither sent nor undoable */
+function texTab(o){
+  const box=el("div",{class:"textab"}), q=el("input",{type:"search",placeholder:"Поиск текстуры","aria-label":"Поиск текстуры",autocomplete:"off"}); q.value=texQuery;
+  const grid=el("div",{class:"tgrid"}), params=el("div",{class:"tparams"});
+  const fillGrid=()=>{ grid.textContent=""; const f=q.value.trim().toLowerCase(); let n=0;
+    for(const s of texList()){ if(f&&!Tex.nameOf(s).toLowerCase().includes(f)) continue; n++;
+      grid.append(texCard(s,{pressed:sameSrc(o.get(),s),onClick:()=>{ const c=o.get(); o.apply(Object.assign(srcOf(s),{rot:c?.rot||0,offMm:c?.offMm||[0,0],tint:c?.tint||null}),true); setBrushFrom(o.get()); },onInfo:()=>openTexInfo(s)})); }
+    if(!n) grid.append(el("div",{class:"meta empty",text:"Ничего не найдено."})); };
+  q.oninput=()=>{ texQuery=q.value; fillGrid(); };
+  let shown=null;
+  const stamp=()=>JSON.stringify(o.get())+"|"+o.finish();
+  const fillParams=()=>{
+    const c=o.get(); shown=stamp(); params.textContent="";
+    if(!c||!Tex.exists(c)){ params.append(el("div",{class:"meta",text:"Выберите текстуру: она зальёт "+o.what+"."})); return; }
+    const go=(patch,key)=>{ const cur=o.get(); if(cur) o.apply(Object.assign({},cur,patch),true,undefined,key); };
+    const s=Tex.sizeOf(c), num=(v,label,on,extra)=>{ const i=el("input",Object.assign({type:"number",value:String(v),"aria-label":label},extra||{})); i.onchange=()=>{ const x=parseFloat(i.value); if(Number.isFinite(x)) on(x); else i.value=String(v); }; return i; };
+    const wI=num(s[0],"Ширина фрагмента, мм",x=>go({sizeMm:[clampMm(x),s[1]]},"size"),{min:"5",max:"20000",step:"10"});
+    const hI=num(s[1],"Высота фрагмента, мм",x=>go({sizeMm:[s[0],clampMm(x)]},"size"),{min:"5",max:"20000",step:"10"});
+    params.append(el("span",{class:"label",text:"Размер фрагмента, мм"}),el("div",{class:"row"},wI,el("span",{class:"meta",text:"×"}),hI,
+      c.sizeMm?el("button",{class:"ghost",text:"Как в библиотеке",on:{click:()=>{ const n=Object.assign({},o.get()); delete n.sizeMm; o.apply(n,true); }}}):null));
+    const rot=c.rot||0, off=c.offMm||[0,0];
+    params.append(el("span",{class:"label",text:"Поворот"}),el("div",{class:"row"},
+      el("button",{text:"⟲ 90°",on:{click:()=>go({rot:(rot+270)%360})}}),el("span",{class:"mono",text:rot+"°"}),el("button",{text:"⟳ 90°",on:{click:()=>go({rot:(rot+90)%360})}})));
+    const shift=(ax,label)=>el("div",{class:"row"},el("span",{class:"meta",text:label}),
+      el("button",{class:"step",text:"−10","aria-label":label+": минус 10 мм",on:{click:()=>go({offMm:ax?[off[0],off[1]-10]:[off[0]-10,off[1]]},"off"+ax)}}),
+      num(off[ax],"Сдвиг "+label+", мм",x=>go({offMm:ax?[off[0],Math.round(x)]:[Math.round(x),off[1]]},"off"+ax),{step:"10"}),
+      el("button",{class:"step",text:"+10","aria-label":label+": плюс 10 мм",on:{click:()=>go({offMm:ax?[off[0],off[1]+10]:[off[0]+10,off[1]]},"off"+ax)}}));
+    params.append(el("span",{class:"label",text:"Сдвиг, мм (шаг 10)"}),shift(0,"X"),shift(1,"Y"));
+    params.append(el("span",{class:"label",text:"Тон (умножается на текстуру) и фактура"}));
+    const pk=Picker.create({color:c.tint||"#ffffff",finish:o.finish(),showFinish:true,
+      onInput:hex=>{ fromPicker=true; const cur=o.get(); if(cur) o.apply(Object.assign({},cur,{tint:hex}),false); fromPicker=false; },
+      onChange:({color,finish})=>{ fromPicker=true; const cur=o.get(); if(cur) o.apply(Object.assign({},cur,{tint:color}),true,finish); fromPicker=false; shown=stamp(); }});
+    params.append(pk.el,el("div",{class:"row"},el("button",{class:"ghost",text:"Без оттенка",on:{click:()=>go({tint:null})}}),el("button",{class:"danger",text:"Убрать текстуру",on:{click:()=>o.apply(null,true)}})));
+  };
+  fillGrid(); fillParams();
+  box.append(q,grid,params);
+  if(canWrite) box.append(el("button",{text:"＋ Новая текстура по фото…",on:{click:newTexture}}));
+  return {el:box,sync(){ const k=o.get()?Tex.srcKey(o.get()):""; grid.querySelectorAll(".tcard").forEach(b=>b.setAttribute("aria-pressed",String(!!k&&k===b.dataset.k))); if(!fromPicker&&shown!==stamp()) fillParams(); }};
+}
 
 let ctxS=null;
 function renderCtx(soft){
@@ -421,54 +496,75 @@ function renderCtx(soft){
   if(!selected){ c.hidden=true; c.textContent=""; ctxS=null; return; }
   if(selected.kind==="mat"){
     const m=materials.get(selected.name); if(!m){ c.hidden=true; return; }
-    const sig=["mat",selected.name,scope,selected.mesh?.uuid,canWrite].join("|");
+    const sig=["mat",selected.name,scope,selected.mesh?.uuid,canWrite,ctxTab,libVer].join("|");
     if(soft&&ctxS&&ctxS.sig===sig){ ctxS.update(); c.hidden=false; return; }
     c.hidden=false; c.textContent="";
     const t=targetFor(scope,selected.mesh,selected.name);
     c.append(el("span",{class:"label",text:"Поверхность"}), el("h2",{text:selected.name}));
     const meta=el("div",{class:"meta mono"}); c.append(meta);
-    const curOf=()=>{ const d=targetDoc(t); return {color:d?.color||(t.scope==="all"?m.orig:hexOf(selected.mesh.material.color)),finish:d?.finish||null,changed:!!d}; };
-    const upd=()=>{ const cur=curOf(); meta.textContent=(t.scope==="all"?"":t.label+" · ")+"Цвет "+cur.color.toUpperCase()+(cur.changed?"  · изменён":"  · как в модели"); return cur; };
-    const cur=upd(); let pk=null;
+    const curOf=()=>{ const d=targetDoc(t); if(d) return {color:d.color,finish:d.finish||null,changed:true,tex:d.tex||null};
+      if(t.scope==="all") return {color:m.orig,finish:null,changed:false,tex:null};
+      const lk=lookOf(selected.mesh); return {color:lk.color,finish:null,changed:false,tex:lk.tex}; };
+    const upd=()=>{ const cur=curOf(), tx=cur.tex&&Tex.exists(cur.tex); meta.textContent=(t.scope==="all"?"":t.label+" · ")+(tx?"Текстура «"+Tex.nameOf(cur.tex)+"»":"Цвет "+cur.color.toUpperCase())+(cur.changed?"  · изменён":"  · как в модели"); return cur; };
+    const cur=upd(); let pk=null, tt=null;
     if(canWrite){
       const seg=el("div",{class:"seg scope",role:"group","aria-label":"Что красим (V)"});
       for(const[v,l]of SCOPES){ const b=el("button",{text:l,title:l+" (V)","aria-pressed":String(scope===v)}); b.disabled=!selected.mesh&&v!=="all"; b.onclick=()=>{ scope=v; renderTools(); renderCtx(); }; seg.append(b); }
       c.append(seg);
+      c.append(el("div",{class:"seg",role:"group","aria-label":"Цвет или текстура"},
+        ...[["color","Цвет"],["tex","Текстура"]].map(([k,l])=>el("button",{text:l,"aria-pressed":String(ctxTab===k),on:{click:()=>{ ctxTab=k; renderCtx(); }}}))));
       let before=snap(t);
-      pk=Picker.create({color:cur.color,finish:cur.finish,showFinish:true,
-        onInput:hex=>{ fromPicker=true; setTarget(t,hex,curOf().finish,false); fromPicker=false; },
-        onChange:({color,finish})=>{ fromPicker=true; pushUndo({t:"target",tgt:t,prev:before}); setTarget(t,color,finish,true); before=snap(t); fromPicker=false; }});
-      c.append(pk.el);
+      if(ctxTab==="color"){
+        pk=Picker.create({color:cur.color,finish:cur.finish,showFinish:true,
+          onInput:hex=>{ fromPicker=true; setTarget(t,hex,curOf().finish,false); fromPicker=false; },
+          onChange:({color,finish})=>{ fromPicker=true; pushUndo({t:"target",tgt:t,prev:before}); setTarget(t,color,finish,true); before=snap(t); fromPicker=false; }});
+        c.append(pk.el);
+      } else {
+        tt=texTab({what:"эту поверхность",get:()=>curOf().tex,finish:()=>curOf().finish,
+          apply(next,final,fin,key){ if(final) pushUndo({t:"target",tgt:t,prev:before},key&&(t.scope+(t.key||t.name)+key)); setTex(t,next,final,fin); if(final) before=snap(t); }});
+        c.append(tt.el);
+      }
       c.append(el("button",{class:"ghost",text:"Как было",on:{click:()=>{ pushUndo({t:"target",tgt:t,prev:snap(t)}); resetTarget(t,true); before=null; }}}));
-    } else c.append(el("div",{class:"meta",text:"Режим просмотра: менять цвета может только редактор."}));
+    } else {
+      c.append(el("div",{class:"meta",text:"Режим просмотра: менять цвета и текстуры может только редактор."}));
+    }
     c.append(el("button",{class:"ghost",text:"Закрыть",on:{click:()=>select(null)}}));
-    ctxS={sig,update(){ const k=upd(); if(pk&&!fromPicker) pk.set(k.color,k.finish); }};
+    ctxS={sig,update(){ const k=upd(); if(pk&&!fromPicker) pk.set(k.color,k.finish); tt&&tt.sync(); }};
   } else {
     const it=items.get(selected.id); if(!it){ c.hidden=true; return; }
     const d=it.doc, def=d.type==="builtin"?LIB[d.key]:null, mdl=d.type==="model"?models.get(d.model):null;
-    const sig=["item",selected.id,d.type,d.key||d.model,canWrite].join("|");
+    const sig=["item",selected.id,d.type,d.key||d.model,canWrite,ctxTab,libVer].join("|");
     const size=()=>{ const bb=new THREE.Box3().setFromObject(it.obj), sz=new THREE.Vector3(); bb.getSize(sz); return sz; };
     if(soft&&ctxS&&ctxS.sig===sig){ ctxS.update(); c.hidden=false; return; }
     c.hidden=false; c.textContent="";
     const title=def?def.name:(mdl?.name||"3D-модель");
     c.append(el("span",{class:"label",text:"Предмет"}), el("h2",{text:title}));
     const sizeMeta=el("div",{class:"meta mono"}); c.append(sizeMeta);
-    const showSize=()=>{ const sz=size(); sizeMeta.textContent=`${Math.round(sz.x*1000)} × ${Math.round(sz.z*1000)} × ${Math.round(sz.y*1000)} мм`; };
-    showSize(); let pk=null;
+    const showSize=()=>{ const sz=size(), tx=items.get(selected.id)?.doc.tex; sizeMeta.textContent=`${Math.round(sz.x*1000)} × ${Math.round(sz.z*1000)} × ${Math.round(sz.y*1000)} мм`+(tx&&Tex.exists(tx)?" · текстура «"+Tex.nameOf(tx)+"»":""); };
+    showSize(); let pk=null, tt=null;
     if(canWrite){
       c.append(el("div",{class:"row"},
         el("button",{text:"⟲ 90°",title:"Повернуть (Shift+R)",on:{click:()=>rotateItem(selected.id,-Math.PI/2)}}),
         el("button",{text:"⟳ 90°",title:"Повернуть (R)",on:{click:()=>rotateItem(selected.id,Math.PI/2)}}),
         el("button",{text:"⟳ 15°",on:{click:()=>rotateItem(selected.id,Math.PI/12)}}),
         el("button",{text:"Переместить",on:{click:()=>startPlacing({moveId:selected.id})}})));
+      const id=selected.id; let before=d;
+      const itemTex=()=>texTab({what:def?"этот предмет":"эту модель (у неё должна быть развёртка UV)",get:()=>items.get(id)?.doc.tex||null,finish:()=>items.get(id)?.doc.finish||null,
+        apply(next,final,fin,key){ const cd=items.get(id); if(!cd) return;
+          if(final){ pushUndo({t:"item",id,prev:before},key&&(id+key)); commitItem(id,Object.assign({tex:next},fin!==undefined?{finish:fin}:{})); before=items.get(id)?.doc; }
+          else syncItem(id,Object.assign({},cd.doc,{tex:next})); }});
       if(def){
-        c.append(el("span",{class:"label",text:"Цвет обивки / отделки"}));
-        const id=selected.id; let before=d;
-        pk=Picker.create({color:d.color||def.color,finish:d.finish||null,showFinish:true,
-          onInput:hex=>{ const cur=items.get(id); if(cur){ fromPicker=true; syncItem(id,Object.assign({},cur.doc,{color:hex})); fromPicker=false; } },
-          onChange:({color,finish})=>{ fromPicker=true; pushUndo({t:"item",id,prev:before}); commitItem(id,{color,finish}); before=items.get(id)?.doc; fromPicker=false; }});
-        c.append(pk.el);
+        c.append(el("div",{class:"seg",role:"group","aria-label":"Цвет или текстура"},
+          ...[["color","Цвет"],["tex","Текстура"]].map(([k,l])=>el("button",{text:l,"aria-pressed":String(ctxTab===k),on:{click:()=>{ ctxTab=k; renderCtx(); }}}))));
+        if(ctxTab==="color"){
+          c.append(el("span",{class:"label",text:"Цвет обивки / отделки"}));
+          pk=Picker.create({color:d.color||def.color,finish:d.finish||null,showFinish:true,
+            onInput:hex=>{ const cur=items.get(id); if(cur){ fromPicker=true; syncItem(id,Object.assign({},cur.doc,{color:hex,tex:null})); fromPicker=false; } },
+            onChange:({color,finish})=>{ fromPicker=true; pushUndo({t:"item",id,prev:before}); commitItem(id,{color,finish,tex:null}); before=items.get(id)?.doc; fromPicker=false; }});
+          c.append(pk.el);
+        } else { tt=itemTex(); c.append(tt.el); }
       } else {
+        c.append(el("span",{class:"label",text:"Текстура модели"})); tt=itemTex(); c.append(tt.el);
         c.append(el("span",{class:"label",text:"Размер"}));
         const w=el("input",{type:"number",min:"50",step:"10",value:String(Math.round(size().x*1000)),"aria-label":"Ширина, мм",id:"itemW",style:"width:100px"});
         c.append(el("div",{class:"row"},w,el("span",{class:"meta",text:"мм по ширине"}),
@@ -479,30 +575,47 @@ function renderCtx(soft){
         el("button",{class:"danger",text:"Удалить",on:{click:()=>removeItem(selected.id)}})));
     }
     c.append(el("button",{class:"ghost",text:"Закрыть",on:{click:()=>select(null)}}));
-    ctxS={sig,update(){ showSize(); const cur=items.get(selected?.id)?.doc; if(pk&&cur&&!fromPicker) pk.set(cur.color||def.color,cur.finish||null); }};
+    ctxS={sig,update(){ showSize(); const cur=items.get(selected?.id)?.doc; if(pk&&cur&&!fromPicker) pk.set(cur.color||def.color,cur.finish||null); tt&&tt.sync(); }};
   }
 }
 
 /* ---------------- paint ---------------- */
-function applyMeshPart(o,byKey){
-  const base=o.userData.baseMat, mi=materials.get(o.userData.matName);
-  const d=byKey.get("piece:"+o.name)||byKey.get("group:"+groupOf(o));
-  if(!d){ if(o.material!==base){ o.material.dispose(); o.material=base; o.userData.ownMat=null; } return; }
-  let own=o.userData.ownMat; if(!own||o.material!==own){ own=o.userData.ownMat=base.clone(); o.material=own; }
-  setHex(own.color,d.color);
-  applyFinish(own,d.finish||paint.get(keyOf(o.userData.matName))?.finish||null,mi.o);
+function dropOwn(o){ const own=o.userData.ownMat; if(own){ own.dispose(); o.userData.ownMat=null; } }
+/* one mesh: a piece / wall override replaces the whole-material look entirely (a part without a texture is a flat colour, whatever the material has) */
+function applyMeshLook(o,byKey,used){
+  const base=o.userData.baseMat, mi=materials.get(o.userData.matName), all=paint.get(keyOf(o.userData.matName));
+  const part=byKey.get("piece:"+o.name)||byKey.get("group:"+groupOf(o)), d=part||all;
+  const finish=(part?(part.finish||all?.finish):all?.finish)||null;
+  if(d&&d.tex&&Tex.exists(d.tex)){
+    /* textured copies are shared by every mesh with the same look: one material per (model material, texture, size, rotation, shift, tint, finish) */
+    const key=base.uuid+"#"+Tex.sig(d.tex,d.tex.tint||null)+"#"+(finish||"");
+    let m=houseTex.get(key); if(!m){ m=Tex.makeMat(base,d.tex); applyFinish(m,finish,mi.o); houseTex.set(key,m); }
+    used.add(key); dropOwn(o); o.material=m; return;
+  }
+  if(!part){ dropOwn(o); if(o.material!==base) o.material=base; return; }
+  let own=o.userData.ownMat; if(!own||o.material!==own){ dropOwn(o); own=o.userData.ownMat=base.clone(); o.material=own; }
+  setHex(own.color,part.color);
+  applyFinish(own,finish,mi.o);
 }
 function applyAllPaint(){
   for(const[name,m]of materials){ const d=paint.get(keyOf(name)); setHex(m.mat.color,d?.color||m.orig); applyFinish(m.mat,d?.finish||null,m.o); }
-  const byKey=new Map(); for(const d of parts.values()) byKey.set(d.key,d);
-  for(const o of meshes) applyMeshPart(o,byKey);
+  const byKey=partsByKey(), used=new Set();
+  for(const o of meshes) applyMeshLook(o,byKey,used);
+  for(const[k,m]of houseTex) if(!used.has(k)){ Tex.disposeMat(m); houseTex.delete(k); }   // looks nobody wears any more: free the material and, with the last user, the picture
 }
-function setTarget(t,hex,finish,send){
-  const old=targetDoc(t), fin=finish===undefined?(old?.finish??null):finish;
-  const doc={color:hex,finish:fin,by:myId,at:Date.now()};
-  if(t.scope==="all"){ doc.name=t.name; paint.set(keyOf(t.name),doc); if(send) sendOk(Sync.setPaint(keyOf(t.name),{name:t.name,color:hex,finish:fin})); }
-  else { doc.key=t.key; parts.set(partDocId(t.key),doc); if(send) sendOk(Sync.setPart(partDocId(t.key),{key:t.key,color:hex,finish:fin})); }
+/* the stored look of a target. tex is {id|builtin, sizeMm?, rot, offMm, tint} or null; colour stays as it was when the texture is taken off */
+function putTarget(t,color,finish,tex,send){
+  const doc={color,finish,by:myId,at:Date.now()}; if(tex) doc.tex=tex;
+  if(t.scope==="all"){ doc.name=t.name; paint.set(keyOf(t.name),doc); if(send) sendOk(Sync.setPaint(keyOf(t.name),{name:t.name,color,finish,tex:tex||undefined})); }
+  else { doc.key=t.key; parts.set(partDocId(t.key),doc); if(send) sendOk(Sync.setPart(partDocId(t.key),{key:t.key,color,finish,tex:tex||undefined})); }
   applyAllPaint(); renderCtx(true);
+}
+/* a plain colour replaces whatever texture was there */
+function setTarget(t,hex,finish,send,tex){ const old=targetDoc(t); putTarget(t,hex,finish===undefined?(old?.finish??null):finish,tex||null,send); }
+function setTex(t,tex,send,finish){
+  const old=targetDoc(t); if(!tex&&!old) return;
+  const base=old?.color||(t.scope==="all"?materials.get(t.name)?.orig:lookOf(t.mesh).color);
+  putTarget(t,base,finish===undefined?(old?.finish??null):finish,tex||null,send);
 }
 function resetTarget(t,send){
   if(t.scope==="all"){ paint.delete(keyOf(t.name)); if(send) sendOk(Sync.resetPaint(keyOf(t.name))); }
@@ -527,18 +640,20 @@ function syncItem(id,doc){
     Promise.resolve(buildItem(doc)).then(g=>{
       if(holder.token!==token||!g) return;
       holder.obj.clear(); g.traverse(o=>{ if(o.isMesh){ o.castShadow=o.receiveShadow=true; } }); holder.obj.add(g);
+      applyItemTex(holder);
       if(selected?.kind==="item"&&selected.id===id){ highlight(); renderCtx(true); }
     }).catch(()=>{});
     it=holder;
   }
   it.doc=doc;
+  if(!needRebuild&&JSON.stringify(doc.tex||null)!==it.texSig) applyItemTex(it);
   if(!(ptr.drag&&ptr.drag.id===id)&&!(placing&&placing.moveId===id)){
     it.obj.position.set(doc.x||0,doc.y||0,doc.z||0);
   }
   it.obj.rotation.y=doc.r||0; it.obj.scale.setScalar(doc.s||1);
   if(selected?.kind==="item"&&selected.id===id){ highlight(); }
 }
-function dropItem(id){ const it=items.get(id); if(!it) return; itemsRoot.remove(it.obj); items.delete(id); if(selected?.id===id) select(null); }
+function dropItem(id){ const it=items.get(id); if(!it) return; clearItemTex(it); itemsRoot.remove(it.obj); items.delete(id); if(selected?.id===id) select(null); }
 function commitItem(id,patch){
   const it=items.get(id); if(!it) return;
   const doc=Object.assign({},it.doc,patch,{at:Date.now(),by:myId});
@@ -665,7 +780,7 @@ async function pumpModels(){
 function queueThumbs(){
   if(!libOpen()) return;
   if(libTab==="base"){ for(const key of Object.keys(LIB)) if(!baseThumbSrc(key)&&!thumbJobs.baseQ.includes(key)) thumbJobs.baseQ.push(key); pumpBase(); }
-  else if(canWrite){ for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
+  else if(libTab==="up"&&canWrite){ for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
 }
 function cubeIcon(){
   const s=document.createElementNS("http://www.w3.org/2000/svg","svg"); s.setAttribute("viewBox","0 0 24 24"); s.setAttribute("width","30"); s.setAttribute("height","30");
@@ -729,8 +844,9 @@ function makeCard({id,kind,name,dims,extra,src,failed,onPlace,onInfo,build}){
 const modelThumbSrc=m=>m.thumb?"/uploads/"+m.thumb+"?t="+(m.thumbAt||0):null;
 function renderLib(){
   const L=$("libList"); stopSpin(); L.textContent=""; cards.clear();
-  $("tBase").setAttribute("aria-pressed",libTab==="base"); $("tUp").setAttribute("aria-pressed",libTab==="up");
-  $("uploadRow").hidden=(libTab!=="up"||!canWrite); $("libSort").hidden=(libTab!=="up");
+  $("tBase").setAttribute("aria-pressed",libTab==="base"); $("tUp").setAttribute("aria-pressed",libTab==="up"); $("tTex").setAttribute("aria-pressed",libTab==="tex");
+  $("uploadRow").hidden=(libTab==="base"||!canWrite); $("libSort").hidden=(libTab!=="up");
+  $("bUpload").hidden=libTab!=="up"; $("upNote").hidden=libTab!=="up"; $("bNewTex").hidden=libTab!=="tex";
   const q=libQuery.trim().toLowerCase(), hit=n=>!q||String(n).toLowerCase().includes(q);
   if(libTab==="base"){
     for(const[key,def]of Object.entries(LIB)){
@@ -740,6 +856,12 @@ function renderLib(){
         build:async()=>baseObject(key)}));
     }
     if(!L.firstChild) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
+  } else if(libTab==="tex"){
+    const list=texList().filter(s=>hit(Tex.nameOf(s)));
+    for(const s of list) L.append(texCard(s,{pressed:tool==="tex"&&sameSrc(s,texBrush.src),
+      onClick:()=>{ if(!canWrite){ openTexInfo(s); return; } texBrush={src:srcOf(s),sizeMm:null,rot:0,offMm:[0,0],tint:null}; saveTexBrush(); if(tool!=="tex") setTool("tex"); else renderTools(); renderLib(); },
+      onInfo:()=>openTexInfo(s)}));
+    if(!list.length) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
   } else {
     const list=[...models.entries()].filter(([,m])=>hit(m.name||"Модель"));
     list.sort(libSort==="name"?(a,b)=>String(a[1].name).localeCompare(String(b[1].name),"ru"):(a,b)=>(b[1].at||0)-(a[1].at||0));
@@ -752,11 +874,12 @@ function renderLib(){
         build:()=>{ const m=models.get(id); return m?loadFresh(m):null; }}));
     }
   }
-  $("bUpload").hidden=!canWrite;
   queueThumbs();
 }
 $("tBase").onclick=()=>{libTab="base";renderLib();};
 $("tUp").onclick=()=>{libTab="up";renderLib();};
+$("tTex").onclick=()=>{libTab="tex";renderLib();};
+$("bNewTex").onclick=newTexture;
 $("libSearch").oninput=e=>{ libQuery=e.target.value; renderLib(); };
 $("libSort").onchange=e=>{ libSort=e.target.value; renderLib(); };
 const toggleLib=()=>{ const c=$("lib").classList.toggle("collapsed"); $("bLib").setAttribute("aria-expanded",String(!c)); $("libClose").textContent=c?"+":"—"; if(c) stopSpin(); else renderLib(); };
@@ -887,6 +1010,113 @@ function loadModel(id){
   modelCache.set(id,p); return p;
 }
 
+/* ---------------- textures: furniture, brush, library window ---------------- */
+/* furniture: a textured copy of the item's tint material (builtin: triplanar in the item's own frame) or a map with repeat / rotation (uploaded model with UV) */
+function clearItemTex(h){
+  if(h.texMats){ for(const m of h.texMats) (m.userData.mapClone?Tex.disposeMapMat:Tex.disposeMat)(m); h.texMats=null; }
+  h.obj.traverse(o=>{ if(o.isMesh&&o.userData.origMat){ o.material=o.userData.origMat; o.userData.origMat=null; } });
+  texItems.delete(h);
+}
+function applyItemTex(h){
+  clearItemTex(h);
+  const d=h.doc, tex=d.tex&&Tex.exists(d.tex)?d.tex:null; h.texSig=JSON.stringify(d.tex||null);
+  if(!tex) return;
+  const mats=new Map(), made=[];
+  if(d.type==="builtin"){
+    h.obj.traverse(o=>{
+      if(!o.isMesh||!o.userData.tint||Array.isArray(o.material)) return;
+      const orig=o.material; let m=mats.get(orig);
+      if(!m){ m=Tex.makeMat(orig,tex); applyFinish(m,d.finish||null,{r:0.8,m:0}); mats.set(orig,m); made.push(m); }
+      o.userData.origMat=orig; o.material=m;
+    });
+    if(made.length) texItems.add(h);
+  } else {
+    const bb=new THREE.Box3().setFromObject(h.obj), sz=new THREE.Vector3(); bb.getSize(sz);
+    h.obj.traverse(o=>{
+      if(!o.isMesh||Array.isArray(o.material)) return;
+      const m=Tex.makeMapMat(o.material,tex,[Math.max(sz.x,sz.z),sz.y]); applyFinish(m,d.finish||null,{r:o.material.roughness,m:o.material.metalness});
+      o.userData.origMat=o.material; o.material=m; made.push(m);
+    });
+  }
+  h.texMats=made;
+}
+function refreshItemTex(){ for(const h of items.values()) if(h.doc.tex) applyItemTex(h); }
+
+/* ---------------- texture brush (tool T) ---------------- */
+const DEF_BRUSH=()=>({src:{builtin:"tile600"},sizeMm:null,rot:0,offMm:[0,0],tint:null});
+let texBrush=DEF_BRUSH();
+try{ const sv=JSON.parse(localStorage.getItem("villa.texbrush")||"null");
+  if(sv&&sv.src&&(sv.src.id||Tex.builtins[sv.src.builtin])) texBrush={src:sv.src.id?{id:String(sv.src.id)}:{builtin:sv.src.builtin},sizeMm:Array.isArray(sv.sizeMm)?sv.sizeMm:null,rot:[0,90,180,270].includes(sv.rot)?sv.rot:0,offMm:Array.isArray(sv.offMm)?sv.offMm:[0,0],tint:HEXRE.test(sv.tint||"")?sv.tint:null}; }catch{}
+const saveTexBrush=()=>{ try{ localStorage.setItem("villa.texbrush",JSON.stringify(texBrush)); }catch{} };
+function brushTex(){ const o=Object.assign({},texBrush.src,{rot:texBrush.rot,offMm:texBrush.offMm.slice(),tint:texBrush.tint}); if(texBrush.sizeMm) o.sizeMm=texBrush.sizeMm.slice(); return o; }
+function setBrushFrom(tx){ if(!tx||!Tex.exists(tx)) return; texBrush={src:srcOf(tx),sizeMm:tx.sizeMm?tx.sizeMm.slice():null,rot:tx.rot||0,offMm:(tx.offMm||[0,0]).slice(),tint:tx.tint||null}; saveTexBrush(); if(tool==="tex") renderTools(); }
+function ensureBrush(){ if(!Tex.exists(texBrush.src)){ texBrush=DEF_BRUSH(); saveTexBrush(); } }
+function cycleTex(d){ ensureBrush(); const L=texList(); let i=L.findIndex(s=>sameSrc(s,texBrush.src)); i=((i<0?0:i)+d+L.length)%L.length; texBrush.src=srcOf(L[i]); texBrush.sizeMm=null; saveTexBrush(); renderTools(); renderLib(); }
+function scaleTex(f){ ensureBrush(); const s=texBrush.sizeMm||Tex.defaultSize(texBrush.src); texBrush.sizeMm=[clampMm(s[0]*f),clampMm(s[1]*f)]; saveTexBrush(); renderTools(); }
+function rotTexBrush(){ texBrush.rot=(texBrush.rot+90)%360; saveTexBrush(); renderTools(); }
+
+/* ---------------- new texture (photo) ---------------- */
+async function newTexture(){
+  if(!canWrite) return;
+  if(document.pointerLockElement) document.exitPointerLock();
+  const r=await TexDlg.open(); if(!r||!validTex(r.doc)) return;
+  Tex.library.set(r.id,r.doc); libVer++;
+  texBrush={src:{id:r.id},sizeMm:null,rot:0,offMm:[0,0],tint:null}; saveTexBrush();
+  libTab="tex"; renderLib(); renderCtx(); renderTools();
+  toast("Текстура «"+r.doc.name+"» добавлена и выбрана для кисти T.");
+}
+
+/* ---------------- texture window: tiled preview, size, rename / delete (editor, uploaded ones only) ---------------- */
+let ti=null;
+function closeTexInfo(){ if(!ti) return; const p=ti; ti=null; document.removeEventListener("keydown",p.onKey,true); p.root.remove(); p.opener?.focus?.(); }
+function openTexInfo(src){
+  closeTexInfo();
+  const up=!!src.id, cur=()=>up?Tex.library.get(src.id):Tex.builtins[src.builtin]; if(!cur()) return;
+  const h2=el("h2",{id:"tiTitle"}), info=el("div",{class:"meta mono"}), msg=el("div",{class:"meta",role:"status"}), tile=el("div",{class:"ti-tile"});
+  const actions=el("div",{class:"row"}), confirmRow=el("div",{class:"row pv-confirm",hidden:""});
+  const dlg=el("div",{class:"panel pv-dlg",role:"dialog","aria-modal":"true","aria-labelledby":"tiTitle"},
+    el("div",{class:"pv-head"},h2,el("button",{class:"ghost",text:"✕","aria-label":"Закрыть",on:{click:closeTexInfo}})),tile,
+    el("div",{class:"meta",text:"Так выглядит текстура, повторённая 3×3. Размер фрагмента — реальный размер одной картинки на поверхности."}),info,actions,confirmRow,msg);
+  const root=el("div",{class:"pv-back",id:"texInfo"},dlg); document.body.append(root);
+  const p=ti={root,opener:document.activeElement,upd,onKey:e=>{ if(e.key==="Escape"){ e.stopPropagation(); closeTexInfo(); } else if(e.key!=="Tab"&&!e.target.closest?.("input")) e.stopPropagation(); }};
+  document.addEventListener("keydown",p.onKey,true);
+  root.addEventListener("pointerdown",e=>{ if(e.target===root) closeTexInfo(); });
+  function upd(){
+    const d=cur(); if(!d){ closeTexInfo(); toast("Текстура удалена."); return; }
+    h2.textContent=d.name; const s=d.sizeMm;
+    info.textContent=s[0]+" × "+s[1]+" мм"+(up?(d.seamless?" · бесшовная":"")+(d.by?"":""):" · встроенная");
+    const u=up?"/uploads/textures/"+d.file1024:Tex.builtinThumb(src.builtin);
+    tile.style.backgroundImage="url("+u+")"; tile.style.backgroundSize=(100/3)+"% "+(up?(100/3*s[1]/s[0]):100/3)+"%";
+  }
+  upd();
+  const useBtn=el("button",{class:"primary",text:"Выбрать для кисти T",on:{click:()=>{ texBrush={src:srcOf(src),sizeMm:null,rot:0,offMm:[0,0],tint:null}; saveTexBrush(); closeTexInfo(); if(tool!=="tex") setTool("tex"); else renderTools(); renderLib(); }}});
+  if(canWrite) actions.append(useBtn);
+  if(canWrite&&up){
+    const ren=el("button",{text:"Название и размер"}), del=el("button",{class:"danger",text:"Удалить"});
+    const back=()=>{ confirmRow.hidden=true; confirmRow.textContent=""; actions.hidden=false; };
+    ren.onclick=()=>{
+      const d=cur(), n=el("input",{type:"text",maxlength:"60","aria-label":"Название",class:"pv-name",value:d.name});
+      const w=el("input",{type:"number",min:"5",max:"20000",value:String(d.sizeMm[0]),"aria-label":"Ширина, мм",class:"td-num"}), h=el("input",{type:"number",min:"5",max:"20000",value:String(d.sizeMm[1]),"aria-label":"Высота, мм",class:"td-num"});
+      const ok=el("button",{class:"primary",text:"Сохранить"}), no=el("button",{class:"ghost",text:"Отмена",on:{click:back}});
+      const save=async()=>{ const name=n.value.trim().slice(0,60), W=Math.round(+w.value), H=Math.round(+h.value);
+        if(!name||!(W>=5&&W<=20000&&H>=5&&H<=20000)){ msg.textContent="Проверьте название и размер (5–20000 мм)."; return; }
+        ok.disabled=true;
+        try{ const r=await Sync.patchTexture(src.id,{name,sizeMm:[W,H]}); if(r?.doc&&validTex(r.doc)) Tex.library.set(src.id,r.doc); libVer++; upd(); back(); msg.textContent=""; renderLib(); }
+        catch(e){ msg.textContent=e.code==="forbidden"?"Менять текстуры может только редактор.":"Не удалось сохранить."; ok.disabled=false; } };
+      ok.onclick=save; n.onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); save(); } };
+      actions.hidden=true; confirmRow.hidden=false; confirmRow.textContent=""; confirmRow.append(n,w,el("span",{class:"meta",text:"×"}),h,el("span",{class:"meta",text:"мм"}),ok,no); n.focus(); n.select();
+    };
+    del.onclick=()=>{
+      const yes=el("button",{class:"danger primary-danger",text:"Да, удалить"}), no=el("button",{class:"ghost",text:"Отмена",on:{click:back}});
+      actions.hidden=true; confirmRow.hidden=false; confirmRow.textContent="";
+      confirmRow.append(el("span",{class:"pv-ask",text:"Удалить «"+cur().name+"»? Она пропадёт со всех поверхностей и предметов, где использована."}),yes,no); no.focus();
+      yes.onclick=async()=>{ yes.disabled=true; try{ await Sync.removeTexture(src.id); closeTexInfo(); }catch(e){ msg.textContent=e.code==="forbidden"?"Удалять текстуры может только редактор.":"Не удалось удалить."; yes.disabled=false; } };
+    };
+    actions.append(ren,del);
+  }
+  (canWrite?useBtn:dlg.querySelector("button")).focus();
+}
+
 /* ---------------- hotkey tools ---------------- */
 let tool=null, brushIdx=0, addIdx=0, lastAddRot=0;
 const brush=["#f4f1ea","#d9d2c3","#8193b8","#5d5aa8","#9fb9a6","#2f4f3e","#c28a5a","#2b2926"];
@@ -895,7 +1125,9 @@ try{ const sv=JSON.parse(localStorage.getItem("villa.brush")||"null"); if(sv&&Ar
 const saveBrush=()=>{ try{ localStorage.setItem("villa.brush",JSON.stringify({c:brush,f:brushFinish})); }catch{} };
 function cycleScope(){ const i=SCOPES.findIndex(x=>x[0]===scope); scope=SCOPES[(i+1)%SCOPES.length][0]; renderTools(); renderCtx(); toast("Красим: "+SCOPES.find(x=>x[0]===scope)[1].toLowerCase()); }
 const undo=[];
-function pushUndo(u){ undo.push(u); if(undo.length>60) undo.shift(); }
+let undoKey=null, undoAt=0;
+/* key: a burst of the same kind of change (clicking "+10 mm" five times) is one undo step */
+function pushUndo(u,key){ const now=performance.now(); if(key&&undoKey===key&&undo.length&&now-undoAt<1500){ undoAt=now; return; } undo.push(u); if(undo.length>60) undo.shift(); undoKey=key||null; undoAt=now; }
 function addList(){
   return [...Object.entries(LIB).map(([k,d])=>({doc:{type:"builtin",key:k,color:d.color},name:d.name})),
           ...[...models.entries()].sort((a,b)=>(b[1].at||0)-(a[1].at||0)).map(([id,m])=>({doc:{type:"model",model:id},name:m.name||"Модель"}))];
@@ -917,6 +1149,7 @@ function startAdd(){
 function cycle(d){
   if(tool==="paint"){ brushIdx=(brushIdx+d+brush.length)%brush.length; renderTools(); }
   else if(tool==="add"){ addIdx+=d; if(placing) cancelPlacing(true); startAdd(); renderTools(); }
+  else if(tool==="tex") cycleTex(d);
 }
 function aimHit(){ return pickAt(document.pointerLockElement===renderer.domElement); }
 function useTool(){
@@ -925,6 +1158,10 @@ function useTool(){
     if(!h) return; const iid=itemIdOf(h.object), hex=brush[brushIdx];
     if(iid){ const it=items.get(iid); if(it?.doc.type==="builtin"){ pushUndo({t:"item",id:iid,prev:it.doc}); commitItem(iid,brushFinish?{color:hex,finish:brushFinish}:{color:hex}); } else toast("Загруженную модель перекрасить нельзя."); }
     else if(h.object.userData.matName){ const n=h.object.userData.matName, t=targetFor(scope,h.object,n); pushUndo({t:"target",tgt:t,prev:snap(t)}); setTarget(t,hex,brushFinish||undefined,true); P_addRecent(hex); toast(t.label+" → "+hex.toUpperCase()); }
+  } else if(tool==="tex"){
+    if(!h) return; ensureBrush(); const tx=brushTex(), iid=itemIdOf(h.object);
+    if(iid){ const it=items.get(iid); if(!it) return; pushUndo({t:"item",id:iid,prev:it.doc}); commitItem(iid,{tex:tx}); toast("«"+Tex.nameOf(tx)+"» наложена на предмет"); }
+    else if(h.object.userData.matName){ const t=targetFor(scope,h.object,h.object.userData.matName); pushUndo({t:"target",tgt:t,prev:snap(t)}); setTex(t,tx,true); toast(t.label+" ← «"+Tex.nameOf(tx)+"»"); }
   } else if(tool==="move"){
     if(placing) return; const iid=h&&itemIdOf(h.object);
     if(iid) startPlacing({moveId:iid}); else toast("Наведите прицел на предмет.");
@@ -949,14 +1186,15 @@ function deleteTarget(){
 }
 const P_addRecent=hex=>Picker.addRecent(hex);
 function pipette(){
-  const h=aimHit(); if(!h) return; const iid=itemIdOf(h.object); let hex=null, fin=null;
-  if(iid){ const d=items.get(iid)?.doc; if(d?.type==="builtin"){ hex=d.color||LIB[d.key]?.color; fin=d.finish||null; } }
-  else if(h.object.userData.matName){ const n=h.object.userData.matName; hex=hexOf(h.object.material.color); fin=targetDoc(targetFor(scope,h.object,n))?.finish||paint.get(keyOf(n))?.finish||null; }
+  const h=aimHit(); if(!h) return; const iid=itemIdOf(h.object); let hex=null, fin=null, tx=null;
+  if(iid){ const d=items.get(iid)?.doc; tx=d?.tex||null; if(d?.type==="builtin"){ hex=d.color||LIB[d.key]?.color; fin=d.finish||null; } }
+  else if(h.object.userData.matName){ const lk=lookOf(h.object); tx=lk.tex; hex=lk.color; fin=lk.finish; }
+  if(tx&&Tex.exists(tx)){ setBrushFrom(tx); if(tool!=="tex") setTool("tex"); else renderTools(); toast("Текстура взята: «"+Tex.nameOf(tx)+"»"); return; }
   if(!hex) return; brush[brushIdx]=hex; brushFinish=fin; saveBrush(); if(tool!=="paint") setTool("paint"); else renderTools(); toast("Цвет взят: "+hex.toUpperCase());
 }
 function doUndo(){
   const u=undo.pop(); if(!u){ toast("Нечего отменять."); return; }
-  if(u.t==="target"){ if(u.prev) setTarget(u.tgt,u.prev.color,u.prev.finish,true); else resetTarget(u.tgt,true); }
+  if(u.t==="target"){ if(u.prev) setTarget(u.tgt,u.prev.color,u.prev.finish,true,u.prev.tex); else resetTarget(u.tgt,true); }
   else if(u.prev){ const d=Object.assign({},u.prev); syncItem(u.id,d); sendOk(Sync.commitItem(u.id,d)); }
   else removeItem(u.id);
   toast("Отменено.");
@@ -987,7 +1225,8 @@ function renderTools(){
   const tb=(key,label,on,act)=>{ const b=el("button",{"aria-pressed":String(!!on),title:label+" ("+key+")"},el("kbd",{text:key}),el("span",{class:"nm",text:label})); b.onclick=act; return b; };
   const cur=el("span",{class:"cur"}); cur.style.background=brush[brushIdx];
   const pb=tb("Q","Заливка",tool==="paint",()=>setTool("paint")); pb.append(cur);
-  bar.append(pb, tb("E","Добавить",tool==="add",()=>setTool("add")), tb("G","Переместить",tool==="move",()=>grab()),
+  ensureBrush(); const tbtn=tb("T","Текстура",tool==="tex",()=>setTool("tex")), tp=el("span",{class:"tprev"}), tu=Tex.thumbOf(texBrush.src); if(tu) tp.style.backgroundImage="url("+tu+")"; tbtn.append(tp);
+  bar.append(pb, tbtn, tb("E","Добавить",tool==="add",()=>setTool("add")), tb("G","Переместить",tool==="move",()=>grab()),
     tb("R","Повернуть",false,()=>rotateTarget(1)), tb("X","Удалить",false,()=>deleteTarget()),
     tb("C","Пипетка",false,()=>pipette()), tb("V",SCOPES.find(x=>x[0]===scope)[1],false,()=>cycleScope()), tb("Z","Отменить",false,()=>doUndo()));
   T.append(bar);
@@ -997,6 +1236,17 @@ function renderTools(){
     row.append(el("button",{text:"Цвет…","aria-pressed":String(brushPickOpen),title:"Палитра для выбранного слота",on:{click:()=>{ brushPickOpen=!brushPickOpen; renderTools(); }}}));
     T.append(row);
     T.append(el("div",{class:"meta",id:"brushMeta"})); renderToolsMeta();
+  } else if(tool==="tex"){
+    const sz=texBrush.sizeMm||Tex.defaultSize(texBrush.src), big=el("span",{class:"tprev"}), bu=Tex.thumbOf(texBrush.src); if(bu) big.style.backgroundImage="url("+bu+")";
+    T.append(el("div",{class:"trow"},
+      el("button",{text:"‹",title:"Предыдущая ( [ или колесо )",on:{click:()=>cycleTex(-1)}}), big,
+      el("b",{text:Tex.nameOf(texBrush.src),style:"min-width:130px;text-align:center"}),
+      el("button",{text:"›",title:"Следующая ( ] или колесо )",on:{click:()=>cycleTex(1)}}),
+      el("span",{class:"mono meta",text:sz[0]+"×"+sz[1]+" мм · "+texBrush.rot+"°"}),
+      el("button",{text:"−",title:"Мельче (Shift+колесо)","aria-label":"Масштаб меньше",on:{click:()=>scaleTex(1/1.1)}}),
+      el("button",{text:"+",title:"Крупнее (Shift+колесо)","aria-label":"Масштаб больше",on:{click:()=>scaleTex(1.1)}}),
+      el("button",{text:"⟳ 90°",title:"Повернуть текстуру (R)",on:{click:rotTexBrush}})));
+    T.append(el("div",{class:"meta",text:"Красим: "+SCOPES.find(x=>x[0]===scope)[1].toLowerCase()+". Клик по стене, полу или предмету — наложить. [ ] или колесо (в прогулке) — сменить, Shift+колесо — масштаб, R — повернуть, V — область, C — взять с поверхности."}));
   } else if(tool==="add"){
     const L=addList(); const cur=L[((addIdx%L.length)+L.length)%L.length];
     T.append(el("div",{class:"brush"},
@@ -1088,8 +1338,10 @@ async function renameMe(){ const n=await askName("Изменить имя",Sync.
 /* ---------------- sync wiring ---------------- */
 function validPaint(v){ return v&&typeof v.name==="string"&&HEXRE.test(v.color||""); }
 function validItem(v){ return v&&(v.type==="builtin"||v.type==="model"); }
+function validTex(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}\.webp$/.test(v.file)&&typeof v.thumb==="string"&&Array.isArray(v.sizeMm)&&v.sizeMm.length===2; }
 function validModel(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}\.glb$/.test(v.file); }
 function applyState(s){
+  Tex.library.clear(); for(const[k,v]of Object.entries(s.textures||{})) if(validTex(v)) Tex.library.set(k,v); libVer++;
   if(s.house) onHouseVersion(s.house.v,houseShown);
   paint.clear(); for(const[k,v]of Object.entries(s.paint||{})) if(validPaint(v)) paint.set(k,v);
   parts.clear(); for(const[k,v]of Object.entries(s.parts||{})) if(HEXRE.test(v?.color||"")&&typeof v.key==="string") parts.set(k,v);
@@ -1171,6 +1423,9 @@ function boot(){
   Sync.on("model.updated",m=>{ if(validModel(m.doc)&&models.has(m.id)){ models.set(m.id,m.doc); cards.get("up:"+m.id)?.patch(); pv?.upd(); } });
   Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); renderLib(); pv?.upd(); });
   Sync.on("house.updated",m=>onHouseVersion(m.v,true));
+  Sync.on("texture.added",m=>{ if(validTex(m.doc)){ Tex.library.set(m.id,m.doc); libVer++; renderLib(); renderCtx(); renderTools(); } });
+  Sync.on("texture.updated",m=>{ if(validTex(m.doc)&&Tex.library.has(m.id)){ Tex.library.set(m.id,m.doc); libVer++; applyAllPaint(); refreshItemTex(); renderLib(); renderCtx(); renderTools(); ti?.upd(); } });
+  Sync.on("texture.removed",m=>{ Tex.library.delete(m.id); Tex.forget(m.id); libVer++; applyAllPaint(); refreshItemTex(); renderLib(); renderCtx(); renderTools(); ti?.upd(); });
   Sync.on("swatches.set",m=>Picker.setProject(m.doc?.colors||[]));
   const go=()=>Sync.connect();
   if(Sync.profile.name) go();
@@ -1179,7 +1434,13 @@ function boot(){
 /* read-only snapshot for the Playwright test (tests/house.e2e.js) */
 window.__villa=()=>({preview:pv?{az:pv.controls.getAzimuthalAngle(),polar:pv.controls.getPolarAngle(),loaded:!!pv.obj}:null,
   cards:[...cards.keys()],houseV,shownV,mode,items:items.size,geoms:renderer.info.memory.geometries,walkY:walk.pos.y,
-  colors:Object.fromEntries([...materials].map(([n,m])=>[n,hexOf(m.mat.color)])),ownCount:meshes.filter(o=>o.userData.ownMat).length});
+  colors:Object.fromEntries([...materials].map(([n,m])=>[n,hexOf(m.mat.color)])),ownCount:meshes.filter(o=>o.userData.ownMat).length,
+  tool,uvTex:[...items.values()].filter(h=>h.texMats&&h.texMats.some(m=>m.userData.mapClone)).length,texLib:Tex.library.size,texMats:houseTex.size,texCache:Tex.cacheSize(),texItems:texItems.size,texBrush});
+/* test hooks (read only): what a mesh wears, and where a world point lands on screen */
+window.__villaTex=()=>({meshes:meshes.map(o=>({box:(b=>[b.min.toArray(),b.max.toArray()])(new THREE.Box3().setFromObject(o)),name:o.name,mat:o.userData.matName,tex:!!(o.material.userData&&o.material.userData.tp),size:o.material.userData?.tp?o.material.userData.tp.tpSize.value.toArray():null,rot:o.material.userData?.tp?o.material.userData.tp.tpRot.value.elements.slice(0,2):null})),
+  project:(x,y,z)=>{ const v=new THREE.Vector3(x,y,z).project(camera); const r=renderer.domElement.getBoundingClientRect(); return [r.left+(v.x+1)/2*r.width,r.top+(1-v.y)/2*r.height]; }});
+window.__villaView=(pos,target)=>{ if(mode!=="orbit") return; camera.position.set(...pos); orbit.target.set(...target); orbit.update(); };
+window.__villaSelect=(name,i)=>{ const mesh=meshes.find(o=>o.userData.matName===name&&(i==null||o.name===i)); if(mesh) select({kind:"mat",name,mesh}); return !!mesh; };
 boot();
 updateHint(); renderLib(); renderTools();
 })();

@@ -3,3 +3,7 @@ data/
 node_modules/
 *.log
 .env.dev
+.env.local
+data-dev/
+EDIT_LINK.local.txt
+test-results/

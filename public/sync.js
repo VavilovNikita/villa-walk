@@ -85,6 +85,9 @@ S.upload=(file,name)=>{ const fd=new FormData(); fd.append("name",name); fd.appe
 S.uploadThumb=(id,blob,mm)=>api("POST","/api/models/"+encodeURIComponent(id)+"/thumb?w="+mm[0]+"&d="+mm[1]+"&h="+mm[2],blob,{"content-type":blob.type});
 S.renameModel=(id,name)=>api("PATCH","/api/models/"+encodeURIComponent(id),JSON.stringify({name}),{"content-type":"application/json"});
 S.removeModel=id=>api("DELETE","/api/models/"+encodeURIComponent(id));
+S.uploadTexture=fd=>api("POST","/api/textures",fd);
+S.patchTexture=(id,patch)=>api("PATCH","/api/textures/"+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});
+S.removeTexture=id=>api("DELETE","/api/textures/"+encodeURIComponent(id));
 
 S.houseInfo=async()=>{ const r=await fetch("/api/house",{cache:"no-store",headers:{"x-edit-key":key}}); if(!r.ok) throw new Error("http "+r.status); return r.json(); };
 S.restoreHouse=name=>api("POST","/api/house/restore",JSON.stringify({name}),{"content-type":"application/json"});

@@ -43,6 +43,8 @@ const fin = v => v == null ? null : (FINISH.has(v) ? v : undefined);
 const num = (v, lim = 200) => typeof v === "number" && Number.isFinite(v) && Math.abs(v) <= lim;
 const vec3 = v => Array.isArray(v) && v.length === 3 && v.every(x => num(x, 1000));
 const bad = () => { throw new Error("invalid"); };
+let textures = null; // set once the app exists (server/textures.js)
+const texDoc = v => textures.texDoc(v);
 
 const ID = /^[a-z0-9]{6,20}$/;
 function itemDoc(d, by) {
@@ -56,6 +58,7 @@ function itemDoc(d, by) {
   out.s = d.s == null ? 1 : (num(d.s, 100) && d.s > 0.01 ? d.s : bad());
   if (d.color != null) { if (typeof d.color !== "string" || !HEX.test(d.color)) bad(); out.color = d.color; }
   const f = fin(d.finish); if (f === undefined) bad(); out.finish = f;
+  const tex = texDoc(d.tex); if (tex) out.tex = tex;
   out.by = by; out.at = Date.now();
   return out;
 }
@@ -63,13 +66,15 @@ function paintDoc(d, by) {
   if (!isObj(d) || typeof d.color !== "string" || !HEX.test(d.color)) bad();
   const name = clean(d.name); if (!name) bad();
   const f = fin(d.finish); if (f === undefined) bad();
-  return { name, color: d.color, finish: f, by, at: Date.now() };
+  const tex = texDoc(d.tex);
+  return { name, color: d.color, finish: f, ...(tex ? { tex } : {}), by, at: Date.now() };
 }
 function partDoc(d, by) {
   if (!isObj(d) || typeof d.color !== "string" || !HEX.test(d.color)) bad();
   const key = clean(d.key, 70); if (!/^(group|piece):.{1,60}$/.test(key)) bad();
   const f = fin(d.finish); if (f === undefined) bad();
-  return { key, color: d.color, finish: f, by, at: Date.now() };
+  const tex = texDoc(d.tex);
+  return { key, color: d.color, finish: f, ...(tex ? { tex } : {}), by, at: Date.now() };
 }
 
 /* ---------------- mutations (shared by ws handlers) ---------------- */
@@ -112,7 +117,7 @@ app.register(require("@fastify/multipart"), { limits: { fileSize: MAX_MODEL_BYTE
 /* models saved before thumbnails existed have no thumb fields: expose them as null without touching the stored rows */
 const modelOut = d => ({ thumb: null, thumbAt: null, ...d });
 const models = () => Object.fromEntries(Object.entries(collection("models")).map(([id, d]) => [id, modelOut(d)]));
-const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: collection("items"), models: models(), swatches: getDoc("swatches", "project") || { colors: [] } });
+const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: collection("items"), models: models(), textures: textures.list(), swatches: getDoc("swatches", "project") || { colors: [] } });
 app.get("/api/state", async (req, reply) => { reply.header("Cache-Control", "no-store"); return snapshot(); });
 app.get("/api/health", async () => ({ ok: true, peers: peers.size }));
 
@@ -240,6 +245,12 @@ app.delete("/api/models/:id", async (req, reply) => {
   rmThumbs(id);
   broadcast({ t: "model.deleted", id });
   return { ok: true };
+});
+
+/* ---- texture library ---- */
+textures = require("./textures").createTextures({
+  app, UPLOADS, getDoc, putDoc, del: (c, id) => q.del.run(c, id), collection, count: c => q.count.get(c).n, broadcast: m => broadcast(m),
+  keyOk, idOk, ID, clean, isObj, num, HEX,
 });
 
 /* ---------------- websocket ---------------- */
