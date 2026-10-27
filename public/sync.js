@@ -81,7 +81,15 @@ async function api(method,url,body,extra){
   if(!r.ok){ const e=new Error(j.error||("http "+r.status)); e.code=j.error||String(r.status); throw e; }
   return j;
 }
-S.upload=(file,name)=>{ const fd=new FormData(); fd.append("name",name); fd.append("file",file,file.name); return api("POST","/api/models",fd); };
+/* XHR instead of fetch: only it reports upload progress */
+const xhrPost=(url,fd,onProgress)=>new Promise((res,rej)=>{
+  const x=new XMLHttpRequest(); x.open("POST",url); x.setRequestHeader("x-edit-key",key); x.setRequestHeader("x-uid",profile.uid); x.responseType="json";
+  x.upload.onprogress=e=>{ if(e.lengthComputable&&onProgress) onProgress(e.loaded/e.total,e.loaded,e.total); };
+  x.onload=()=>{ const j=x.response||{}; if(x.status>=200&&x.status<300) res(j); else { const e=new Error(j.error||("http "+x.status)); e.code=j.error||String(x.status); rej(e); } };
+  x.onerror=()=>{ const e=new Error("network"); e.code="network"; rej(e); };
+  x.send(fd);
+});
+S.upload=(file,name,onProgress)=>{ const fd=new FormData(); fd.append("name",name); fd.append("file",file,file.name); return xhrPost("/api/models",fd,onProgress); };
 S.uploadThumb=(id,blob,mm)=>api("POST","/api/models/"+encodeURIComponent(id)+"/thumb?w="+mm[0]+"&d="+mm[1]+"&h="+mm[2],blob,{"content-type":blob.type});
 S.renameModel=(id,name)=>api("PATCH","/api/models/"+encodeURIComponent(id),JSON.stringify({name}),{"content-type":"application/json"});
 S.removeModel=id=>api("DELETE","/api/models/"+encodeURIComponent(id));
@@ -91,15 +99,7 @@ S.removeTexture=id=>api("DELETE","/api/textures/"+encodeURIComponent(id));
 
 S.houseInfo=async()=>{ const r=await fetch("/api/house",{cache:"no-store",headers:{"x-edit-key":key}}); if(!r.ok) throw new Error("http "+r.status); return r.json(); };
 S.restoreHouse=name=>api("POST","/api/house/restore",JSON.stringify({name}),{"content-type":"application/json"});
-/* XHR instead of fetch: only it reports upload progress */
-S.uploadHouse=(file,onProgress)=>new Promise((res,rej)=>{
-  const fd=new FormData(); fd.append("file",file,file.name);
-  const x=new XMLHttpRequest(); x.open("POST","/api/house"); x.setRequestHeader("x-edit-key",key); x.responseType="json";
-  x.upload.onprogress=e=>{ if(e.lengthComputable&&onProgress) onProgress(e.loaded/e.total); };
-  x.onload=()=>{ const j=x.response||{}; if(x.status>=200&&x.status<300) res(j); else { const e=new Error(j.error||("http "+x.status)); e.code=j.error||String(x.status); rej(e); } };
-  x.onerror=()=>{ const e=new Error("network"); e.code="network"; rej(e); };
-  x.send(fd);
-});
+S.uploadHouse=(file,onProgress)=>{ const fd=new FormData(); fd.append("file",file,file.name); return xhrPost("/api/house",fd,onProgress); };
 
 window.Sync=S;
 })();

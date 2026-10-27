@@ -4,7 +4,7 @@
   "description": "",
   "main": "index.js",
   "scripts": {
-    "test": "node tests/house.e2e.js && node tests/thumbs.e2e.js && node tests/tex.e2e.js",
+    "test": "node tests/house.e2e.js && node tests/thumbs.e2e.js && node tests/tex.e2e.js && node tests/bigmodel.e2e.js",
     "house:reload": "node scripts/house-reload.js",
     "dev": "node --watch --env-file=.env.local server/index.js"
   },

@@ -10,7 +10,7 @@ const EDIT_KEY = process.env.EDIT_KEY || "";
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, "..", "data"));
 if (EDIT_KEY.length < 16) { console.error("EDIT_KEY is missing or too short (set it in .env)"); process.exit(1); }
 
-const MAX_PEERS = 40, MAX_MODEL_BYTES = 30 * 1024 * 1024, MAX_ITEMS = 3000, MAX_MODELS = 300, MAX_THUMB_BYTES = 300 * 1024, MAX_THUMB_PX = 1024;
+const MAX_PEERS = 40, MAX_MODEL_BYTES = 200 * 1024 * 1024, MAX_ITEMS = 3000, MAX_MODELS = 300, MAX_THUMB_BYTES = 300 * 1024, MAX_THUMB_PX = 1024;
 const UPLOADS = path.join(DATA_DIR, "uploads"), MODELS = path.join(DATA_DIR, "models");
 fs.mkdirSync(UPLOADS, { recursive: true }); fs.mkdirSync(MODELS, { recursive: true });
 

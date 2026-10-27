@@ -128,6 +128,9 @@ button.primary-danger{background:var(--danger);color:#fff;border-color:var(--dan
 
 /* house model update */
 #houseUp{left:50%;transform:translateX(-50%);top:calc(70px + env(safe-area-inset-top,0px));padding:8px 12px;font-size:13px;display:flex;flex-direction:column;gap:6px;width:min(320px,calc(100vw - 24px))}
+#modelDl{left:50%;transform:translateX(-50%);top:calc(120px + env(safe-area-inset-top,0px));padding:8px 12px;font-size:13px;display:flex;flex-direction:column;gap:6px;width:min(320px,calc(100vw - 24px))}
+#modelDl progress{width:100%;height:8px;accent-color:var(--accent)}
+.bigwarn-btns{display:flex;gap:8px;justify-content:flex-end}
 #houseUp progress{width:100%;height:8px;accent-color:var(--accent)}
 #houseHist{left:max(12px,env(safe-area-inset-left,0px));top:calc(70px + env(safe-area-inset-top,0px));width:min(320px,calc(100vw - 24px));max-height:60vh;overflow:auto;padding:10px 12px;display:flex;flex-direction:column;gap:6px;z-index:6}
 #houseHist .hrow{display:flex;justify-content:space-between;align-items:center;gap:8px;font-size:13px}
@@ -229,6 +232,7 @@ button.primary-danger{background:var(--danger);color:#fff;border-color:var(--dan
   <input id="houseIn" type="file" accept=".glb" hidden>
 </div>
 <div id="houseUp" class="panel" hidden role="status"><span id="houseUpTxt">Загрузка…</span><progress id="houseUpBar" max="100" value="0"></progress></div>
+<div id="modelDl" class="panel" hidden role="status"><span id="modelDlTxt">Загрузка модели…</span><progress id="modelDlBar" max="100" value="0"></progress></div>
 <div id="houseHist" class="panel" hidden aria-label="История версий модели дома"></div>
 
 <div id="people" class="panel" hidden aria-label="Кто здесь"></div>
@@ -249,7 +253,7 @@ button.primary-danger{background:var(--danger);color:#fff;border-color:var(--dan
     <button id="bUpload" class="primary">Загрузить 3D-модель (.glb)</button>
     <input id="fileIn" type="file" accept=".glb" hidden>
     <button id="bNewTex" class="primary" hidden>Новая текстура (по фото)</button>
-    <span class="meta" id="upNote">Модели из Meshy, Tripo, Hunyuan3D, Sketchfab. До 30 МБ.</span>
+    <span class="meta" id="upNote">Модели из Meshy, Tripo, Hunyuan3D, Sketchfab. До 200 МБ.</span>
   </div>
 </div>
 

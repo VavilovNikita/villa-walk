@@ -125,6 +125,18 @@ let houseV=null;             // version requested last (newest wins)
 let houseShown=false;        // first model is on screen
 let shownV=null;             // version of the model that is on screen
 const loadGltf=url=>new Promise((res,rej)=>loader.load(url,res,undefined,rej));
+/* download with progress (fetch + ReadableStream); the file name is unique and served immutable, so the browser cache keeps it after the first time */
+async function fetchBuf(url,onProg,total){
+  const r=await fetch(url); if(!r.ok) throw new Error("http "+r.status);
+  const len=+r.headers.get("content-length")||total||0;
+  if(!r.body||!r.body.getReader){ const b=await r.arrayBuffer(); onProg&&onProg(1,b.byteLength,b.byteLength); return b; }
+  const rd=r.body.getReader(), parts=[]; let got=0;
+  for(;;){ const {done,value}=await rd.read(); if(done) break; parts.push(value); got+=value.length; if(onProg) onProg(len?Math.min(1,got/len):0,got,len); }
+  const out=new Uint8Array(got); let o=0; for(const c of parts){ out.set(c,o); o+=c.length; }
+  return out.buffer;
+}
+const parseGltf=buf=>new Promise((res,rej)=>loader.parse(buf,"/uploads/",res,rej));
+const loadGltfProgress=(url,onProg,total)=>fetchBuf(url,onProg,total).then(parseGltf);
 
 /* walks a scene and builds everything that depends on the house: materials, collision / floor lists, roof parts */
 function indexHouse(root){
@@ -637,6 +649,7 @@ function syncItem(id,doc){
   if(needRebuild){
     const token=Symbol(); const holder=it||{doc,obj:new THREE.Group(),token}; holder.token=token; holder.doc=doc;
     if(!it){ holder.obj.userData.itemId=id; itemsRoot.add(holder.obj); items.set(id,holder); }
+    if(doc.type!=="builtin"&&doc.model&&!modelReady.has(doc.model)&&models.has(doc.model)){ holder.obj.clear(); holder.obj.add(modelPlaceholder(doc.model)); }
     Promise.resolve(buildItem(doc)).then(g=>{
       if(holder.token!==token||!g) return;
       holder.obj.clear(); g.traverse(o=>{ if(o.isMesh){ o.castShadow=o.receiveShadow=true; } }); holder.obj.add(g);
@@ -757,7 +770,7 @@ function normalizeModel(root){
   return wrap;
 }
 /* own copy of a model, never shared with the scene: the caller disposes it */
-const loadFresh=m=>loadGltf("/uploads/"+m.file).then(g=>normalizeModel(g.scene));
+const loadFresh=m=>loadGltfProgress("/uploads/"+m.file,null,m.sizeBytes).then(g=>normalizeModel(g.scene));
 async function makeModelThumb(id){
   const m=models.get(id); if(!m) return;
   const wrap=await loadFresh(m);
@@ -976,38 +989,89 @@ async function openPreview(ref){
 }
 
 /* upload */
+const BIG_WARN=30*1048576, MAX_UPLOAD=200*1048576;
+/* in-page dialog (not confirm()): resolves true on "Загрузить" */
+function bigWarn(text,okLabel){
+  return new Promise(res=>{
+    const prev=document.activeElement;
+    const ok=el("button",{text:okLabel||"Загрузить",on:{click:()=>done(true)}}), no=el("button",{class:"ghost",text:"Отмена",on:{click:()=>done(false)}});
+    const dlg=el("div",{class:"panel pv-dlg",role:"alertdialog","aria-modal":"true","aria-labelledby":"bwTitle"},el("h2",{id:"bwTitle",text:"Большая модель"}),el("div",{text:text}),el("div",{class:"bigwarn-btns"},no,ok));
+    const root=el("div",{class:"pv-back",id:"bigWarn"},dlg); document.body.append(root);
+    const key=e=>{ if(e.key==="Escape"){ e.stopPropagation(); done(false); } };
+    function done(v){ document.removeEventListener("keydown",key,true); root.remove(); try{ prev&&prev.focus(); }catch{} res(v); }
+    document.addEventListener("keydown",key,true); no.focus();
+  });
+}
+const BIG_TEXT="Модель большая — у участников со слабым интернетом и на телефонах она будет грузиться долго.";
+const mbOf=n=>(n/1048576).toFixed(n>=10485760?0:1)+" МБ";
+/* progress with percent and speed for an upload; returns the callback for Sync.upload */
+function upProgressCb(label,total){
+  const t0=performance.now();
+  return (fr,loaded)=>{ const sec=Math.max(.001,(performance.now()-t0)/1000), sp=loaded/sec; houseProgress(label+" "+Math.round(fr*100)+"% · "+mbOf(loaded)+" из "+mbOf(total)+" · "+(sp/1048576).toFixed(1)+" МБ/с",fr); };
+}
 $("bUpload").onclick=()=>$("fileIn").click();
 $("fileIn").onchange=async()=>{
   const f=$("fileIn").files[0]; $("fileIn").value=""; if(!f||!canWrite) return;
   const name=f.name.replace(/\.glb$/i,"").slice(0,60)||"Модель";
   if(!/\.glb$/i.test(f.name)){ toast("Нужен файл в формате .glb"); return; }
-  if(f.size>30*1048576){ toast("Файл больше 30 МБ. Уменьшите модель (например, в Blender) и попробуйте снова."); return; }
+  if(f.size>MAX_UPLOAD){ toast("Файл больше 200 МБ. Уменьшите модель (например, в Blender) и попробуйте снова."); return; }
+  const big=f.size>BIG_WARN;
+  if(big&&!await bigWarn(BIG_TEXT+" Размер файла: "+mbOf(f.size)+".")) return;
+  $("bUpload").disabled=true;
   try{
-    toast("Загружаю «"+name+"»…");
-    const buf=await f.arrayBuffer();
-    const gl=await new Promise((res,rej)=>loader.parse(buf,"",res,rej)); // validate
     let thumb=null;
-    try{ const wrap=normalizeModel(gl.scene); try{ thumb=await Thumbs.renderThumb(wrap); } finally{ Thumbs.disposeObject(wrap); } }catch(e){ console.warn("thumb",e); Thumbs.disposeObject(gl.scene); }
-    const r=await Sync.upload(f,name);
+    if(!big){   // small files are parsed here first (validation + thumbnail); big ones are not held in the browser's memory
+      houseProgress("Проверяю «"+name+"»…");
+      const buf=await f.arrayBuffer();
+      const gl=await new Promise((res,rej)=>loader.parse(buf,"",res,rej)); // validate
+      try{ const wrap=normalizeModel(gl.scene); try{ thumb=await Thumbs.renderThumb(wrap); } finally{ Thumbs.disposeObject(wrap); } }catch(e){ console.warn("thumb",e); Thumbs.disposeObject(gl.scene); }
+    }
+    houseProgress("Загружаю «"+name+"» 0%",0);
+    const r=await Sync.upload(f,name,upProgressCb("Загружаю «"+name+"»",f.size));
+    houseProgress("");
     if(r?.id&&r.doc) models.set(r.id,r.doc);
     libTab="up"; renderLib();
     if(r?.id&&thumb){ try{ const t=await Sync.uploadThumb(r.id,thumb.blob,mmOf(thumb.size)); if(t?.doc&&models.has(r.id)){ models.set(r.id,t.doc); cards.get("up:"+r.id)?.patch(); } }catch(e){ console.warn("thumb upload",e); } }
+    else if(r?.id&&big){   // preview of a big model: rendered as usual, a placeholder card if the browser runs out of memory
+      toast("Готово. Рисую превью…");
+      try{ await makeModelThumb(r.id); }catch(e){ thumbJobs.failed.add(r.id); thumbJobs.seen.add(r.id); cards.get("up:"+r.id)?.patch(); console.warn("thumb (big)",e); }
+    }
     toast("Готово. Нажмите на модель в списке, чтобы поставить.");
   }catch(e){
+    houseProgress("");
     const code=e&&e.code;
-    toast(code==="too_large"?"Файл слишком большой.":code==="forbidden"?"Загружать модели может только редактор.":code==="too_many_models"?"Слишком много моделей. Удалите ненужные.":"Не получилось загрузить: файл повреждён или это не .glb.");
+    toast(code==="too_large"?"Файл слишком большой (максимум 200 МБ).":code==="forbidden"?"Загружать модели может только редактор.":code==="too_many_models"?"Слишком много моделей. Удалите ненужные.":code==="network"?"Нет связи с сервером. Проверьте интернет и повторите.":"Не получилось загрузить: файл повреждён или это не .glb.");
     console.warn(e);
-  }
+  }finally{ $("bUpload").disabled=false; }
 };
+/* download progress of big models, shown to everyone who has such a model in the scene */
+const dlProg=new Map();      // id -> {name, frac}
+function showDl(){
+  const b=$("modelDl"); if(!dlProg.size){ b.hidden=true; return; }
+  const list=[...dlProg.values()], f=list.reduce((a,x)=>a+x.frac,0)/list.length;
+  b.hidden=false; $("modelDlTxt").textContent="Загружается модель «"+list[0].name+"»"+(list.length>1?" и ещё "+(list.length-1):"")+"… "+Math.round(f*100)+"%"; $("modelDlBar").value=Math.round(f*100);
+}
+const BIG_DL=5*1048576;      // below this a model arrives too fast to be worth a progress panel
+const modelReady=new Set();  // ids whose model is loaded: no placeholder for them
 function loadModel(id){
   if(modelCache.has(id)) return modelCache.get(id);
   const m=models.get(id); if(!m) return Promise.resolve(null);
-  const p=new Promise((res,rej)=>loader.load("/uploads/"+m.file,g=>{
+  const big=(m.sizeBytes||0)>=BIG_DL;
+  const p=loadGltfProgress("/uploads/"+m.file,big?(fr=>{ dlProg.set(id,{name:m.name||"Модель",frac:fr}); showDl(); }):null,m.sizeBytes).then(g=>{
       const wrap=normalizeModel(g.scene);
       wrap.traverse(o=>{ if(o.isMesh){ o.castShadow=o.receiveShadow=true; } });
-      res(wrap);
-    },undefined,rej)).catch(e=>{ console.warn(e); const g=new THREE.Group(); bx(g,.5,.5,.5,0,.25,0,mat("#c9c3b6")); return g; });
+      modelReady.add(id);
+      return wrap;
+    }).catch(e=>{ console.warn(e); const g=new THREE.Group(); bx(g,.5,.5,.5,0,.25,0,mat("#c9c3b6")); modelReady.add(id); return g; })
+    .finally(()=>{ dlProg.delete(id); showDl(); });
   modelCache.set(id,p); return p;
+}
+/* grey bounding box of the model's real size while it is still downloading */
+function modelPlaceholder(id){
+  const d=models.get(id)?.dims, g=new THREE.Group();
+  const w=d?d[0]/1000:.6, dd=d?d[1]/1000:.6, h=d?d[2]/1000:.6;
+  const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,dd),new THREE.MeshStandardMaterial({color:0x9a9a9a,transparent:true,opacity:.55,roughness:1}));
+  m.position.y=h/2; g.add(m); return g;
 }
 
 /* ---------------- textures: furniture, brush, library window ---------------- */
@@ -1345,7 +1409,7 @@ function applyState(s){
   if(s.house) onHouseVersion(s.house.v,houseShown);
   paint.clear(); for(const[k,v]of Object.entries(s.paint||{})) if(validPaint(v)) paint.set(k,v);
   parts.clear(); for(const[k,v]of Object.entries(s.parts||{})) if(HEXRE.test(v?.color||"")&&typeof v.key==="string") parts.set(k,v);
-  models.clear(); modelCache.clear(); for(const[k,v]of Object.entries(s.models||{})) if(validModel(v)) models.set(k,v);
+  models.clear(); modelCache.clear(); modelReady.clear(); for(const[k,v]of Object.entries(s.models||{})) if(validModel(v)) models.set(k,v);
   const ids=new Set(Object.keys(s.items||{}));
   for(const id of [...items.keys()]) if(!ids.has(id)) dropItem(id);
   for(const[id,v]of Object.entries(s.items||{})) if(validItem(v)) syncItem(id,v);
@@ -1353,7 +1417,7 @@ function applyState(s){
   applyAllPaint(); renderCtx(true); renderLib(); renderTools(); pv?.upd();
 }
 /* ---------------- house model update (editor) ---------------- */
-const HOUSE_ERR={forbidden:"Менять модель дома может только редактор.",too_large:"Файл больше 30 МБ. Уменьшите модель (например, в Blender) и попробуйте снова.",
+const HOUSE_ERR={forbidden:"Менять модель дома может только редактор.",too_large:"Файл больше 200 МБ. Уменьшите модель (например, в Blender) и попробуйте снова.",
   not_glb:"Это не подходящий файл: нужен целый .glb (glTF 2.0).",network:"Нет связи с сервером. Проверьте интернет и повторите.",not_found:"Эта версия больше недоступна.",upload_failed:"Не удалось загрузить файл. Попробуйте ещё раз."};
 const houseErr=e=>HOUSE_ERR[e&&e.code]||"Не удалось обновить модель дома ("+((e&&e.message)||"ошибка")+").";
 function houseProgress(txt,frac){ const b=$("houseUp"); b.hidden=!txt; if(!txt) return; $("houseUpTxt").textContent=txt; const p=$("houseUpBar"); p.hidden=frac==null; if(frac!=null) p.value=Math.round(frac*100); }
@@ -1361,16 +1425,17 @@ $("bHouse").onclick=()=>{ if(canWrite) $("houseIn").click(); };
 $("houseIn").onchange=async e=>{
   const f=e.target.files[0]; e.target.value=""; if(!f) return;
   if(!/\.glb$/i.test(f.name)){ toast("Нужен файл в формате .glb"); return; }
-  if(f.size>30*1048576){ toast(HOUSE_ERR.too_large); return; }
-  if(!confirm("Заменить модель дома для всех участников? Предыдущая версия сохранится в истории.")) return;
+  if(f.size>200*1048576){ toast(HOUSE_ERR.too_large); return; }
+  if(f.size>30*1048576){ if(!await bigWarn(BIG_TEXT+" Модель дома будет заменена для всех участников; предыдущая версия сохранится в истории. Размер файла: "+mbOf(f.size)+".")) return; }
+  else if(!confirm("Заменить модель дома для всех участников? Предыдущая версия сохранится в истории.")) return;
   $("bHouse").disabled=true;
   try{
     houseProgress("Проверяю файл…");
-    const buf=await f.arrayBuffer(), head=new Uint8Array(buf,0,Math.min(12,buf.byteLength));
+    const head=new Uint8Array(await f.slice(0,12).arrayBuffer());
     if(String.fromCharCode(...head.slice(0,4))!=="glTF") throw Object.assign(new Error("not_glb"),{code:"not_glb"});
-    const gl=await new Promise((res,rej)=>loader.parse(buf,"",res,rej)); disposeHouse(gl.scene); // must parse, otherwise nobody gets it
+    if(f.size<=BIG_WARN){ const gl=await new Promise((res,rej)=>f.arrayBuffer().then(buf=>loader.parse(buf,"",res,rej),rej)); disposeHouse(gl.scene); } // must parse, otherwise nobody gets it (big files: the server checks the header and size)
     houseProgress("Загружаю на сервер… 0%",0);
-    await Sync.uploadHouse(f,fr=>houseProgress("Загружаю на сервер… "+Math.round(fr*100)+"%",fr));
+    await Sync.uploadHouse(f,upProgressCb("Загружаю на сервер…",f.size));
     houseProgress("");
     if(!$("houseHist").hidden) renderHist();
   }catch(err){ houseProgress(""); toast(houseErr(err)); console.warn(err); }
@@ -1421,7 +1486,7 @@ function boot(){
   Sync.on("item.delete",m=>dropItem(m.id));
   Sync.on("model.added",m=>{ if(validModel(m.doc)){ models.set(m.id,m.doc); renderLib(); } });
   Sync.on("model.updated",m=>{ if(validModel(m.doc)&&models.has(m.id)){ models.set(m.id,m.doc); cards.get("up:"+m.id)?.patch(); pv?.upd(); } });
-  Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); renderLib(); pv?.upd(); });
+  Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); modelReady.delete(m.id); renderLib(); pv?.upd(); });
   Sync.on("house.updated",m=>onHouseVersion(m.v,true));
   Sync.on("texture.added",m=>{ if(validTex(m.doc)){ Tex.library.set(m.id,m.doc); libVer++; renderLib(); renderCtx(); renderTools(); } });
   Sync.on("texture.updated",m=>{ if(validTex(m.doc)&&Tex.library.has(m.id)){ Tex.library.set(m.id,m.doc); libVer++; applyAllPaint(); refreshItemTex(); renderLib(); renderCtx(); renderTools(); ti?.upd(); } });
@@ -1432,7 +1497,7 @@ function boot(){
   else askName("Как вас зовут?","",false).then(n=>{ Sync.setName(n); go(); });
 }
 /* read-only snapshot for the Playwright test (tests/house.e2e.js) */
-window.__villa=()=>({preview:pv?{az:pv.controls.getAzimuthalAngle(),polar:pv.controls.getPolarAngle(),loaded:!!pv.obj}:null,
+window.__villa=()=>({modelReady:modelReady.size>0,preview:pv?{az:pv.controls.getAzimuthalAngle(),polar:pv.controls.getPolarAngle(),loaded:!!pv.obj}:null,
   cards:[...cards.keys()],houseV,shownV,mode,items:items.size,geoms:renderer.info.memory.geometries,walkY:walk.pos.y,
   colors:Object.fromEntries([...materials].map(([n,m])=>[n,hexOf(m.mat.color)])),ownCount:meshes.filter(o=>o.userData.ownMat).length,
   tool,uvTex:[...items.values()].filter(h=>h.texMats&&h.texMats.some(m=>m.userData.mapClone)).length,texLib:Tex.library.size,texMats:houseTex.size,texCache:Tex.cacheSize(),texItems:texItems.size,texBrush});
