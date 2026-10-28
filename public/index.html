@@ -126,6 +126,27 @@ button.primary-danger{background:var(--danger);color:#fff;border-color:var(--dan
 #toast{left:50%;transform:translateX(-50%);bottom:calc(64px + env(safe-area-inset-bottom,0px));padding:8px 14px;font-size:13px}
 
 
+
+/* bulk upload: queue panel and drop zone */
+#upDrop{position:fixed;inset:0;z-index:30;display:grid;place-items:center;background:rgba(15,25,21,.55);pointer-events:none}
+#upDrop div{padding:28px 44px;border:3px dashed var(--accent);border-radius:16px;background:var(--panel-solid);font-size:20px;font-weight:600}
+#upq{right:max(12px,env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px));width:min(400px,calc(100vw - 24px));max-height:min(60vh,520px);display:flex;flex-direction:column;gap:6px;padding:10px 12px;z-index:9}
+#upq.collapsed .upq-list,#upq.collapsed .upq-ctrls,#upq.collapsed .upq-notice{display:none}
+.upq-h1{display:flex;justify-content:space-between;align-items:center}
+.upq-bar,.upq-rowbar{width:100%;height:6px;accent-color:var(--accent)}
+.upq-sum{font-size:12px}
+.upq-ctrls,.upq-nbtns{display:flex;gap:6px;flex-wrap:wrap}
+.upq-ctrls button,.upq-nbtns button{min-height:28px;padding:3px 8px;font-size:12.5px}
+.upq-notice{font-size:13px;display:flex;flex-direction:column;gap:6px;padding:8px;border:1px solid var(--warn);border-radius:8px}
+.upq-list{overflow:auto;min-height:0;display:flex;flex-direction:column;gap:4px}
+.upq-row{display:flex;align-items:center;gap:4px;padding:4px 0;border-top:1px solid var(--line)}
+.upq-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.upq-name{font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.upq-st{font-size:11.5px;overflow-wrap:anywhere}
+.upq-row[data-status="error"] .upq-st{color:var(--danger)}
+.upq-row[data-status="done"] .upq-st{color:var(--accent)}
+.upq-x,.upq-again{min-height:26px;width:28px;padding:0}
+
 /* house model update */
 #houseUp{left:50%;transform:translateX(-50%);top:calc(70px + env(safe-area-inset-top,0px));padding:8px 12px;font-size:13px;display:flex;flex-direction:column;gap:6px;width:min(320px,calc(100vw - 24px))}
 #modelDl{left:50%;transform:translateX(-50%);top:calc(120px + env(safe-area-inset-top,0px));padding:8px 12px;font-size:13px;display:flex;flex-direction:column;gap:6px;width:min(320px,calc(100vw - 24px))}
@@ -303,15 +324,15 @@ html.sandbox #sandboxBar{position:absolute;top:-26px}
   </div>
   <div class="list" id="libList"></div>
   <div id="uploadRow" hidden>
-    <button id="bUpload" class="primary">Загрузить 3D-модель (.glb)</button>
-    <input id="fileIn" type="file" accept=".glb" hidden>
+    <div class="row"><button id="bUpload" class="primary" title="Выберите сразу много файлов: .glb, .gltf (с .bin и текстурами рядом) или .zip">Загрузить модели</button><button id="bUploadDir" title="Папка целиком: подпапки станут папками библиотеки">Загрузить папку</button></div>
     <button id="bNewTex" class="primary" hidden>Новая текстура (по фото)</button>
-    <span class="meta" id="upNote">Модели из Meshy, Tripo, Hunyuan3D, Sketchfab. До 200 МБ.</span>
+    <span class="meta" id="upNote">Можно перетащить файлы или целую папку в окно. Модели из Meshy, Tripo, Hunyuan3D, Sketchfab. До 200 МБ.</span>
   </div>
 </div>
 
 <div id="ctx" class="panel" hidden></div>
 <div id="banner" class="panel" hidden></div>
+<div id="upDrop" hidden aria-hidden="true"><div>Отпустите, чтобы загрузить</div></div>
 <div id="toast" class="panel" hidden></div>
 <div id="tools" class="panel" hidden aria-label="Инструменты"></div>
 <div id="hint" class="panel"></div>
@@ -333,11 +354,13 @@ html.sandbox #sandboxBar{position:absolute;top:-26px}
 <script src="/vendor/OrbitControls.js"></script>
 <script src="/vendor/TransformControls.js"></script>
 <script src="/thumbs.js"></script>
+<script src="/gltfpack.js"></script>
 <script src="/tex.js"></script>
 <script src="/texdlg.js"></script>
 <script src="/sync.js"></script>
 <script src="/picker.js"></script>
 <script src="/xform.js"></script>
+<script src="/upq.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

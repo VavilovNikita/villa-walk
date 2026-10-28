@@ -21,8 +21,10 @@ const SEED_HOUSE = SANDBOX ? (process.env.SANDBOX_SEED_HOUSE || "") : "";
 if (EDIT_KEY.length < 16) { console.error("EDIT_KEY is missing or too short (set it in .env)"); process.exit(1); }
 
 const MAX_PEERS = 40, MAX_MODEL_BYTES = (SANDBOX ? 50 : 200) * 1024 * 1024, MAX_TEX_BYTES = (SANDBOX ? 10 : 15) * 1024 * 1024, MAX_ITEMS = 3000, MAX_MODELS = 300, MAX_THUMB_BYTES = 300 * 1024, MAX_THUMB_PX = 1024;
-const UPLOADS = path.join(DATA_DIR, "uploads"), MODELS = path.join(DATA_DIR, "models");
+const UPLOADS = path.join(DATA_DIR, "uploads"), MODELS = path.join(DATA_DIR, "models"), TMP = path.join(DATA_DIR, "tmp");
+const MAX_UNPACKED = (SANDBOX ? 250 : 1024) * 1024 * 1024;   // all the models of one .zip together, after unpacking
 fs.mkdirSync(UPLOADS, { recursive: true }); fs.mkdirSync(MODELS, { recursive: true });
+fs.rmSync(TMP, { recursive: true, force: true }); fs.mkdirSync(TMP, { recursive: true });   // leftovers of an unpacking that was killed
 
 /* ---------------- storage ---------------- */
 const db = new (require("better-sqlite3"))(path.join(DATA_DIR, "villa.db"));
@@ -167,7 +169,7 @@ app.get("/index.html", sendIndex);
 app.register(require("@fastify/static"), { root: path.join(__dirname, "..", "public"), maxAge: 0, index: false });
 app.register(require("@fastify/static"), { root: UPLOADS, prefix: "/uploads/", decorateReply: false, maxAge: "365d", immutable: true, index: false, dotfiles: "deny" });
 app.register(require("@fastify/static"), { root: MODELS, prefix: "/models/", decorateReply: false, cacheControl: false, index: false, dotfiles: "deny" });
-app.register(require("@fastify/multipart"), { limits: { fileSize: MAX_MODEL_BYTES, files: 1, fields: 4, fieldSize: 1024 } });
+app.register(require("@fastify/multipart"), { limits: { fileSize: MAX_MODEL_BYTES, files: 1, fields: 6, fieldSize: 1024 } });
 
 /* models saved before thumbnails existed have no thumb fields: expose them as null without touching the stored rows */
 const modelOut = d => ({ thumb: null, thumbAt: null, folder: null, ...d });
@@ -215,32 +217,108 @@ app.post("/api/house/reload", async (req, reply) => {
   return { ok: true, v: r.meta.v, at: r.meta.at };
 });
 
+/* at most 2 uploads at a time per editor (the browser's queue sends 2); a third gets 429 + Retry-After and the client repeats it by itself */
+const MAX_UPLOADS_PER_EDITOR = 2, uploadSlots = new Map();
+const uidOf = req => clean(req.headers["x-uid"], 32).replace(/[^A-Za-z0-9]/g, "") || "editor";
+function takeSlot(uid) {
+  const n = uploadSlots.get(uid) || 0; if (n >= MAX_UPLOADS_PER_EDITOR) return null;
+  uploadSlots.set(uid, n + 1); let freed = false;
+  return () => { if (freed) return; freed = true; const k = (uploadSlots.get(uid) || 1) - 1; if (k) uploadSlots.set(uid, k); else uploadSlots.delete(uid); };
+}
+/* a big body that nobody will read is not worth draining: the connection is closed (the client sees a dropped upload and tries again), a small one is simply discarded */
+const busy = (reply, req) => { reply.code(429).header("Retry-After", "2"); if (!(+req.headers["content-length"] <= 1048576)) reply.header("Connection", "close"); return reply.send({ error: "busy" }); };
+
+/* a complete .glb in a temp file -> a model of the library. {error} or {skipped, id} or {id, doc, replaced}.
+   replaceId: the model whose file is replaced (same id, so the scene keeps its items); dup "skip" / "replace": what to do with a model of the same name and size in the same folder. */
+function storeModel(tmp, { name, folder, by, replaceId, dup, thumbBy }) {
+  const refuse = error => { fs.rmSync(tmp, { force: true }); return { error }; };
+  const fd = fs.openSync(tmp, "r"), head = Buffer.alloc(12); fs.readSync(fd, head, 0, 12, 0); fs.closeSync(fd);
+  const size = fs.statSync(tmp).size;
+  if (head.toString("latin1", 0, 4) !== "glTF" || head.readUInt32LE(4) !== 2 || head.readUInt32LE(8) !== size) return refuse("not_glb");
+  let old = null;
+  if (replaceId) { old = idOk(replaceId, ID) && getDoc("models", replaceId); if (!old) return refuse("not_found"); }
+  else if (dup === "skip" || dup === "replace") {
+    const hit = Object.entries(collection("models")).find(([, d]) => (d.folder || null) === (folder || null) && d.name === name && d.sizeBytes === size);
+    if (hit) { if (dup === "skip") { fs.rmSync(tmp, { force: true }); return { skipped: true, id: hit[0] }; } replaceId = hit[0]; old = hit[1]; }
+  }
+  if (!old && q.count.get("models").n >= MAX_MODELS) return refuse("too_many_models");
+  const id = old ? replaceId : crypto.randomBytes(8).toString("hex"), file = crypto.randomBytes(8).toString("hex") + ".glb";
+  fs.renameSync(tmp, path.join(UPLOADS, file));
+  const pend = thumbBy ? { thumbBy: by, thumbPendingAt: Date.now() } : {};
+  if (old) {   // the id stays; the new file gets a new name (files are served immutable), the old file and thumbnail go
+    const { dims, thumbBy: _a, thumbPendingAt: _b, ...rest } = old;
+    const doc = { ...rest, file, sizeBytes: size, thumb: null, thumbAt: null, ...pend };
+    putDoc("models", id, doc);
+    fs.rmSync(path.join(UPLOADS, path.basename(old.file)), { force: true }); rmThumbs(id);
+    broadcast({ t: "model.updated", id, doc: modelOut(doc) });
+    return { id, doc: modelOut(doc), replaced: true };
+  }
+  const doc = { name, file, sizeBytes: size, by, at: Date.now(), thumb: null, thumbAt: null, folder: folder && folders.exists(folder) ? folder : null, ...pend };
+  putDoc("models", id, doc);
+  broadcast({ t: "model.added", id, doc });
+  return { id, doc };
+}
+const STORE_STATUS = { not_glb: 400, not_found: 404, too_many_models: 409 };
+
+/* ?replace=<id> replaces that model's file; ?preview=1 says the uploader will send the thumbnail itself (the other editors wait for it) */
 app.post("/api/models", async (req, reply) => {
   if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
-  if (q.count.get("models").n >= MAX_MODELS) return reply.code(409).send({ error: "too_many_models" });
-  const part = await req.file();
-  if (!part) return reply.code(400).send({ error: "no_file" });
-  const id = crypto.randomBytes(8).toString("hex"), file = id + ".glb", tmp = path.join(UPLOADS, id + ".part");
+  const replace = typeof req.query.replace === "string" ? req.query.replace : "";
+  if (!replace && q.count.get("models").n >= MAX_MODELS) return reply.code(409).send({ error: "too_many_models" });
+  const by = uidOf(req), release = takeSlot(by);
+  if (!release) return busy(reply, req);
+  const tmp = path.join(UPLOADS, crypto.randomBytes(8).toString("hex") + ".part");
   try {
+    const part = await req.file();
+    if (!part) return reply.code(400).send({ error: "no_file" });
     await pipeline(part.file, fs.createWriteStream(tmp));
     if (part.file.truncated) { fs.rmSync(tmp, { force: true }); return reply.code(413).send({ error: "too_large" }); }
-    const fd = fs.openSync(tmp, "r"), head = Buffer.alloc(12); fs.readSync(fd, head, 0, 12, 0); fs.closeSync(fd);
-    const size = fs.statSync(tmp).size;
-    if (head.toString("latin1", 0, 4) !== "glTF" || head.readUInt32LE(4) !== 2 || head.readUInt32LE(8) !== size) { fs.rmSync(tmp, { force: true }); return reply.code(400).send({ error: "not_glb" }); }
-    fs.renameSync(tmp, path.join(UPLOADS, file));
     const f = part.fields.name;
     const name = clean(f && f.value) || clean(String(part.filename || "").replace(/\.glb$/i, "")) || "Модель";
-    const by = clean(req.headers["x-uid"], 32).replace(/[^A-Za-z0-9]/g, "") || "editor";
     const ff = part.fields.folder, folder = ff && typeof ff.value === "string" && folders.exists(ff.value) ? ff.value : null;
-    const doc = { name, file, sizeBytes: size, by, at: Date.now(), thumb: null, thumbAt: null, folder };
-    putDoc("models", id, doc);
-    broadcast({ t: "model.added", id, doc });
-    return { id, doc };
+    const r = storeModel(tmp, { name, folder, by, replaceId: replace, thumbBy: req.query.preview === "1" });
+    if (r.error) return reply.code(STORE_STATUS[r.error] || 400).send({ error: r.error });
+    return { id: r.id, doc: r.doc };
   } catch (e) {
     fs.rmSync(tmp, { force: true });
     req.log.warn(e);
     return reply.code(e.code === "FST_REQ_FILE_TOO_LARGE" ? 413 : 400).send({ error: "upload_failed" });
-  }
+  } finally { release(); }
+});
+
+/* ---- a .zip of models: unpacked in the background, one job on the server at a time. ?folder=<id>&dup=skip|copy|replace ---- */
+const bulk = require("./bulk").createBulk({
+  TMP, maxModelBytes: MAX_MODEL_BYTES, maxUnpacked: MAX_UNPACKED, maxModels: MAX_MODELS, count: () => q.count.get("models").n,
+  folders: { ensurePath: (...a) => folders.ensurePath(...a) }, storeModel, broadcast: m => broadcast(m), clean,
+});
+const ZIP_ERR = { bad_zip: 400, zip64: 400, zip_unsafe: 400, too_many_files: 400, too_large: 413, encrypted: 400, method: 400 };
+app.post("/api/models/zip", async (req, reply) => {
+  if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
+  const by = uidOf(req);
+  if (bulk.busy()) return busy(reply, req);
+  const release = takeSlot(by);
+  if (!release) return busy(reply, req);
+  const tmp = path.join(TMP, crypto.randomBytes(8).toString("hex") + ".zip");
+  try {
+    const part = await req.file();
+    if (!part) return reply.code(400).send({ error: "no_file" });
+    await pipeline(part.file, fs.createWriteStream(tmp));
+    if (part.file.truncated) { fs.rmSync(tmp, { force: true }); return reply.code(413).send({ error: "too_large" }); }
+    if (bulk.busy()) { fs.rmSync(tmp, { force: true }); return busy(reply, req); }   // another one started while this one was uploading
+    const folder = typeof req.query.folder === "string" && folders.exists(req.query.folder) ? req.query.folder : null;
+    const dup = ["skip", "copy", "replace"].includes(req.query.dup) ? req.query.dup : "skip";
+    try { return reply.code(202).send(bulk.start(tmp, { folder, by, dup })); }
+    catch (e) { if (e.code && ZIP_ERR[e.code]) return reply.code(ZIP_ERR[e.code]).send({ error: e.code }); throw e; }
+  } catch (e) {
+    fs.rmSync(tmp, { force: true });
+    req.log.warn(e);
+    return reply.code(e.code === "FST_REQ_FILE_TOO_LARGE" ? 413 : 400).send({ error: "upload_failed" });
+  } finally { release(); }
+});
+app.get("/api/jobs/:id", async (req, reply) => {
+  if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
+  const j = bulk.get(req.params.id); if (!j) return reply.code(404).send({ error: "not_found" });
+  reply.header("Cache-Control", "no-store"); return j;
 });
 
 /* ---- thumbnails: raw image body (PNG / WebP) -> uploads/<id>.thumb.<ext> ---- */
@@ -275,6 +353,7 @@ app.post("/api/models/:id/thumb", { bodyLimit: MAX_THUMB_BYTES }, async (req, re
   for (const e of THUMB_EXT) if (e !== img.ext) fs.rmSync(path.join(UPLOADS, id + ".thumb." + e), { force: true });
   const w = dimMm(req.query.w), d = dimMm(req.query.d), h = dimMm(req.query.h);
   const next = { ...doc, thumb: file, thumbAt: Date.now() };
+  delete next.thumbBy; delete next.thumbPendingAt;
   if (w && d && h) next.dims = [w, d, h];
   putDoc("models", id, next);
   broadcast({ t: "model.updated", id, doc: modelOut(next) });

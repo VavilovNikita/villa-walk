@@ -84,15 +84,25 @@ async function api(method,url,body,extra){
   if(!r.ok){ const e=new Error(j.error||("http "+r.status)); e.code=j.error||String(r.status); throw e; }
   return j;
 }
-/* XHR instead of fetch: only it reports upload progress */
-const xhrPost=(url,fd,onProgress)=>new Promise((res,rej)=>{
+/* XHR instead of fetch: only it reports upload progress. ctl (optional) gets .abort(); a 429 carries .retryAfter (seconds) */
+const xhrPost=(url,fd,onProgress,ctl)=>new Promise((res,rej)=>{
   const x=new XMLHttpRequest(); x.open("POST",url); x.setRequestHeader("x-edit-key",key); x.setRequestHeader("x-uid",profile.uid); x.responseType="json";
+  if(ctl) ctl.abort=()=>x.abort();
   x.upload.onprogress=e=>{ if(e.lengthComputable&&onProgress) onProgress(e.loaded/e.total,e.loaded,e.total); };
-  x.onload=()=>{ const j=x.response||{}; if(x.status>=200&&x.status<300) res(j); else { const e=new Error(j.error||("http "+x.status)); e.code=j.error||String(x.status); rej(e); } };
+  x.onload=()=>{ const j=x.response||{}; if(x.status>=200&&x.status<300) res(j); else { const e=new Error(j.error||("http "+x.status)); e.code=j.error||String(x.status); e.status=x.status; e.retryAfter=+x.getResponseHeader("Retry-After")||0; rej(e); } };
   x.onerror=()=>{ const e=new Error("network"); e.code="network"; rej(e); };
+  x.onabort=()=>{ const e=new Error("aborted"); e.code="aborted"; rej(e); };
   x.send(fd);
 });
-S.upload=(file,name,onProgress,folder)=>{ const fd=new FormData(); fd.append("name",name); if(folder) fd.append("folder",folder); fd.append("file",file,file.name); return xhrPost(Env.url("/api/models"),fd,onProgress); };
+/* opts: {folder, replace (model id whose file is replaced), preview (the caller sends the thumbnail itself), ctl} */
+S.upload=(file,name,onProgress,folder,opts)=>{
+  const o=opts||{}, fd=new FormData(); fd.append("name",name); if(folder) fd.append("folder",folder); fd.append("file",file,o.fileName||file.name);
+  const qs=[]; if(o.replace) qs.push("replace="+encodeURIComponent(o.replace)); if(o.preview) qs.push("preview=1");
+  return xhrPost(Env.url("/api/models")+(qs.length?"?"+qs.join("&"):""),fd,onProgress,o.ctl);
+};
+S.uploadZip=(file,folder,dup,onProgress,ctl)=>{ const fd=new FormData(); fd.append("file",file,file.name); return xhrPost(Env.url("/api/models/zip")+"?dup="+encodeURIComponent(dup||"skip")+(folder?"&folder="+encodeURIComponent(folder):""),fd,onProgress,ctl); };
+S.job=id=>api("GET",Env.url("/api/jobs/")+encodeURIComponent(id));
+S.ensureFolders=(parent,path)=>api("POST",Env.url("/api/folders/ensure"),JSON.stringify({parent:parent||null,path}),{"content-type":"application/json"});
 S.uploadThumb=(id,blob,mm)=>api("POST",Env.url("/api/models/")+encodeURIComponent(id)+"/thumb?w="+mm[0]+"&d="+mm[1]+"&h="+mm[2],blob,{"content-type":blob.type});
 S.renameModel=(id,name)=>api("PATCH",Env.url("/api/models/")+encodeURIComponent(id),JSON.stringify({name}),{"content-type":"application/json"});
 S.moveModels=(ids,folder)=>api("POST",Env.url("/api/models/move"),JSON.stringify({ids,folder}),{"content-type":"application/json"});

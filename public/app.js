@@ -793,7 +793,7 @@ const LIB_VER="1";                       // bump when LIB geometry / colours cha
 const THUMB_LS="villa.thumb."+LIB_VER+".";
 const lsGet=k=>{ try{ return localStorage.getItem(Env.ls(k)); }catch{ return null; } };
 const lsSet=(k,v)=>{ try{ localStorage.setItem(Env.ls(k),v); }catch{} };
-let libQuery="", libSort="new";
+let libQuery="", libSort="new", upq=null;   // upq: the upload queue (upq.js), created further down
 const baseThumbs=new Map();              // key -> dataURL (memory; localStorage as second level)
 const baseDims=new Map();                // key -> [w,d,h] mm
 const cards=new Map();                   // "base:key" | "up:id" -> {patch()}
@@ -860,10 +860,12 @@ async function pumpModels(){
     }
   } finally{ thumbJobs.running=false; }
 }
+/* a model uploaded through the queue gets its thumbnail from the uploader (for up to 10 minutes): others, and the uploader's own tab while its queue runs, wait */
+const thumbWaits=m=>!!m.thumbBy&&Math.abs(Date.now()-(m.thumbPendingAt||0))<600000&&(m.thumbBy!==myId||(upq&&upq.busy()));
 function queueThumbs(){
   if(!libOpen()) return;
   if(libTab==="base"){ for(const key of Object.keys(LIB)) if(!baseThumbSrc(key)&&!thumbJobs.baseQ.includes(key)) thumbJobs.baseQ.push(key); pumpBase(); }
-  else if(libTab==="up"&&canWrite){ for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
+  else if(libTab==="up"&&canWrite){ for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)&&!thumbWaits(m)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
 }
 function cubeIcon(){
   const s=document.createElementNS("http://www.w3.org/2000/svg","svg"); s.setAttribute("viewBox","0 0 24 24"); s.setAttribute("width","30"); s.setAttribute("height","30");
@@ -1260,41 +1262,28 @@ function upProgressCb(label,total){
   const t0=performance.now();
   return (fr,loaded)=>{ const sec=Math.max(.001,(performance.now()-t0)/1000), sp=loaded/sec; houseProgress(label+" "+Math.round(fr*100)+"% · "+mbOf(loaded)+" из "+mbOf(total)+" · "+(sp/1048576).toFixed(1)+" МБ/с",fr); };
 }
-$("bUpload").onclick=()=>$("fileIn").click();
-$("fileIn").onchange=async()=>{
-  const f=$("fileIn").files[0]; $("fileIn").value=""; if(!f||!canWrite) return;
-  const name=f.name.replace(/\.glb$/i,"").slice(0,60)||"Модель";
-  if(!/\.glb$/i.test(f.name)){ toast("Нужен файл в формате .glb"); return; }
-  if(f.size>MAX_UPLOAD){ toast("Файл больше "+Env.maxModelMb+" МБ. Уменьшите модель (например, в Blender) и попробуйте снова."); return; }
-  const big=f.size>BIG_WARN;
-  if(big&&!await bigWarn(BIG_TEXT+" Размер файла: "+mbOf(f.size)+".")) return;
-  $("bUpload").disabled=true;
-  try{
-    let thumb=null;
-    if(!big){   // small files are parsed here first (validation + thumbnail); big ones are not held in the browser's memory
-      houseProgress("Проверяю «"+name+"»…");
-      const buf=await f.arrayBuffer();
-      const gl=await new Promise((res,rej)=>loader.parse(buf,"",res,rej)); // validate
-      try{ const wrap=normalizeModel(gl.scene); try{ thumb=await Thumbs.renderThumb(wrap); } finally{ Thumbs.disposeObject(wrap); } }catch(e){ console.warn("thumb",e); Thumbs.disposeObject(gl.scene); }
-    }
-    houseProgress("Загружаю «"+name+"» 0%",0);
-    const r=await Sync.upload(f,name,upProgressCb("Загружаю «"+name+"»",f.size),libFolder);
-    houseProgress("");
-    if(r?.id&&r.doc) models.set(r.id,r.doc);
-    libTab="up"; renderLib();
-    if(r?.id&&thumb){ try{ const t=await Sync.uploadThumb(r.id,thumb.blob,mmOf(thumb.size)); if(t?.doc&&models.has(r.id)){ models.set(r.id,t.doc); cards.get("up:"+r.id)?.patch(); } }catch(e){ console.warn("thumb upload",e); } }
-    else if(r?.id&&big){   // preview of a big model: rendered as usual, a placeholder card if the browser runs out of memory
-      toast("Готово. Рисую превью…");
-      try{ await makeModelThumb(r.id); }catch(e){ thumbJobs.failed.add(r.id); thumbJobs.seen.add(r.id); cards.get("up:"+r.id)?.patch(); console.warn("thumb (big)",e); }
-    }
-    toast("Готово. Нажмите на модель в списке, чтобы поставить.");
-  }catch(e){
-    houseProgress("");
-    const code=e&&e.code;
-    toast(code==="too_large"?"Файл слишком большой (максимум "+Env.maxModelMb+" МБ).":code==="forbidden"?"Загружать модели может только редактор.":code==="too_many_models"?"Слишком много моделей. Удалите ненужные.":code==="network"?"Нет связи с сервером. Проверьте интернет и повторите.":"Не получилось загрузить: файл повреждён или это не .glb.");
-    console.warn(e);
-  }finally{ $("bUpload").disabled=false; }
-};
+/* bulk upload: files, folders and .zip go through the queue in upq.js; the panel and the drop zone live there and here */
+upq=Upq.create({
+  el,Sync,Thumbs,models,folders,loader,modal,
+  maxDepth:MAX_FOLDER_DEPTH,folderDepth,folderOf,normalizeModel,loadFresh,mmOf,
+  canWrite:()=>canWrite,toast,getFolder:()=>libFolder,renderLib:()=>renderLib(),
+  focusUploads:()=>{ libTab="up"; if(!libOpen()) toggleLib(); else renderLib(); },
+  setModel:(id,doc)=>{ models.set(id,doc); },
+  patchCard:id=>cards.get("up:"+id)?.patch(),
+  thumbFailed:id=>{ thumbJobs.failed.add(id); thumbJobs.seen.add(id); cards.get("up:"+id)?.patch(); },
+});
+$("bUpload").onclick=()=>upq.pickFiles();
+$("bUploadDir").onclick=()=>upq.pickFolder();
+/* drop files or a whole folder anywhere on the window; the zone only lights up for files from outside */
+{
+  const zone=$("upDrop"); let depth=0;
+  const hasFiles=e=>e.dataTransfer&&[...(e.dataTransfer.types||[])].includes("Files");
+  addEventListener("dragenter",e=>{ if(!hasFiles(e)) return; e.preventDefault(); depth++; if(canWrite) zone.hidden=false; });
+  addEventListener("dragover",e=>{ if(!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect=canWrite?"copy":"none"; });
+  addEventListener("dragleave",e=>{ if(!hasFiles(e)) return; depth=Math.max(0,depth-1); if(!depth) zone.hidden=true; });
+  addEventListener("drop",e=>{ if(!hasFiles(e)) return; e.preventDefault(); depth=0; zone.hidden=true; if(!canWrite){ toast("Загружать модели может только редактор."); return; } upq.addDataTransfer(e.dataTransfer); });
+  addEventListener("blur",()=>{ depth=0; zone.hidden=true; });
+}
 /* download progress of big models, shown to everyone who has such a model in the scene */
 const dlProg=new Map();      // id -> {name, frac}
 function showDl(){
@@ -1673,6 +1662,11 @@ function validPaint(v){ return v&&typeof v.name==="string"&&HEXRE.test(v.color||
 function validItem(v){ return v&&(v.type==="builtin"||v.type==="model"); }
 function validTex(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}\.webp$/.test(v.file)&&typeof v.thumb==="string"&&Array.isArray(v.sizeMm)&&v.sizeMm.length===2; }
 function validFolder(v){ return v&&typeof v.name==="string"&&(v.parent===null||typeof v.parent==="string"); }
+/* the file of a model was replaced: every item of it in the scene is built again from the new file */
+function reloadModelItems(id){
+  modelCache.delete(id); modelReady.delete(id);
+  for(const[iid,h]of [...items]) if(h.doc.model===id){ const d=h.doc; dropItem(iid); syncItem(iid,d); }
+}
 function validModel(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}\.glb$/.test(v.file); }
 function applyState(s){
   Tex.library.clear(); for(const[k,v]of Object.entries(s.textures||{})) if(validTex(v)) Tex.library.set(k,v); libVer++;
@@ -1794,7 +1788,7 @@ function boot(){
   Sync.on("folder.updated",m=>{ if(validFolder(m.doc)){ folders.set(m.id,m.doc); renderLib(); } });
   Sync.on("folder.deleted",m=>{ folders.delete(m.id); if(libFolder===m.id) libFolder=null; for(const id of [...libSel]) if(!models.has(id)) libSel.delete(id); renderLib(); });
   Sync.on("model.added",m=>{ if(validModel(m.doc)){ models.set(m.id,m.doc); renderLib(); } });
-  Sync.on("model.updated",m=>{ if(validModel(m.doc)&&models.has(m.id)){ const was=folderOf(models.get(m.id)); models.set(m.id,m.doc); if(folderOf(m.doc)!==was) scheduleLib(); else cards.get("up:"+m.id)?.patch(); pv?.upd(); } });
+  Sync.on("model.updated",m=>{ if(validModel(m.doc)&&models.has(m.id)){ const was=folderOf(models.get(m.id)), oldFile=models.get(m.id).file; models.set(m.id,m.doc); if(oldFile!==m.doc.file) reloadModelItems(m.id); if(folderOf(m.doc)!==was) scheduleLib(); else cards.get("up:"+m.id)?.patch(); pv?.upd(); } });
   Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); modelReady.delete(m.id); renderLib(); pv?.upd(); });
   Sync.on("house.updated",m=>onHouseVersion(m.v,true));
   Sync.on("sandbox.reset",()=>{ toast("Тренировочная среда сброшена. Перезагружаю сцену…"); setTimeout(()=>location.reload(),600); });
@@ -1816,6 +1810,8 @@ window.__villaTex=()=>({meshes:meshes.map(o=>({box:(b=>[b.min.toArray(),b.max.to
   project:(x,y,z)=>{ const v=new THREE.Vector3(x,y,z).project(camera); const r=renderer.domElement.getBoundingClientRect(); return [r.left+(v.x+1)/2*r.width,r.top+(1-v.y)/2*r.height]; }});
 /* test hooks (read only): the live transform of an item and where a gizmo handle is on screen */
 window.__villaItem=id=>{ const h=items.get(id); if(!h) return null; const o=h.obj; return {doc:h.doc,p:o.position.toArray(),r:[o.rotation.x,o.rotation.y,o.rotation.z],s:o.scale.toArray(),sel:[...selIds],folder:libFolder}; };
+window.__villaUpq=()=>({items:upq.items().map(i=>({name:i.fileName,rel:i.rel.join("/"),status:i.status,err:i.err||"",wait:i.waitMsg||"",pct:i.pct,note:i.note||"",modelId:i.modelId||null})),...upq.state()});
+window.__villaFolder=()=>libFolder;
 window.__villaCam=()=>({pos:camera.position.toArray(),fov:camera.fov});
 window.__villaGizmo=()=>xf.debug();
 window.__villaSelectItems=ids=>selectItems(ids);

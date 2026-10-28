@@ -38,6 +38,31 @@ function createFolders({ app, getDoc, putDoc, del, collection, broadcast, keyOk,
     return { id, doc: out(doc) };
   });
 
+  /* the chain of folders `names` under `parent`, created where missing and reused where a folder of that name (ignoring case and extra spaces) is already there.
+     Deeper than MAX_DEPTH: the names beyond the limit are dropped, so what belongs there lands in the last level. Returns {id, created} (id = the deepest folder, or parent). */
+  const norm = s => String(s).replace(/\s+/g, " ").trim().toLowerCase();
+  function ensurePath(parent, names, by) {
+    const map = all(); let cur = parent || null, created = 0;
+    if (cur && !map[cur]) throw Object.assign(new Error("not_found"), { code: "not_found" });
+    const room = Math.max(0, MAX_DEPTH - depthOf(cur, map));
+    for (const raw of names.map(n => clean(n)).filter(Boolean).slice(0, room)) {
+      const hit = Object.keys(map).filter(k => (map[k].parent || null) === cur && norm(map[k].name) === norm(raw)).sort((a, b) => (map[a].at || 0) - (map[b].at || 0))[0];
+      if (hit) { cur = hit; continue; }
+      if (Object.keys(map).length >= MAX_FOLDERS) throw Object.assign(new Error("too_many_folders"), { code: "too_many_folders" });
+      const id = newId(), doc = { name: raw, parent: cur, order: nextOrder(cur, map), by, at: Date.now() };
+      putDoc("folders", id, doc); map[id] = out(doc); broadcast({ t: "folder.added", id, doc: out(doc) }); cur = id; created++;
+    }
+    return { id: cur, created };
+  }
+  app.post("/api/folders/ensure", async (req, reply) => {
+    if (forbid(req, reply)) return;
+    const b = isObj(req.body) ? req.body : {};
+    const parent = b.parent == null ? null : b.parent;
+    if (!parentOk(parent) || !Array.isArray(b.path) || b.path.length > 10 || !b.path.every(n => typeof n === "string")) return reply.code(400).send({ error: "invalid" });
+    try { return ensurePath(parent, b.path, clean(req.headers["x-uid"], 32).replace(/[^A-Za-z0-9]/g, "") || "editor"); }
+    catch (e) { if (e.code === "not_found") return reply.code(404).send({ error: "not_found" }); if (e.code === "too_many_folders") return reply.code(409).send({ error: "too_many_folders" }); throw e; }
+  });
+
   app.patch("/api/folders/:id", async (req, reply) => {
     if (forbid(req, reply)) return;
     const { id } = req.params, map = all();
@@ -93,7 +118,7 @@ function createFolders({ app, getDoc, putDoc, del, collection, broadcast, keyOk,
     return { ok: true, moved: n };
   });
 
-  return { all, exists: id => !!id && !!getDoc("folders", id) };
+  return { all, ensurePath, exists: id => !!id && !!getDoc("folders", id) };
 }
 
 module.exports = { createFolders, MAX_DEPTH };
