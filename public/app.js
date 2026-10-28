@@ -82,6 +82,10 @@ const texItems=new Set();    // item holders whose textured materials follow the
 const houseTex=new Map();    // look signature -> textured copy of a house material, shared by every mesh with that look
 let libVer=0;                // bumped when the texture library changes: panels that list it re-render
 let mode="orbit", roofShown=false, selected=null, placing=null, canWrite=false;
+let xf=null;                 // Xform (xform.js): modal G / R / S, gizmo, item panel
+const selIds=new Set();      // ids of the selected items (selected.id is the main one)
+const folders=new Map();     // id -> {name,parent,order}
+let tabSwitch=false;         // the Tab focus switch is changing the mode itself
 let myId=null, myColor="#2f6f62";
 let libTab="base";
 let scope="all";             // what a paint action covers: all | group | piece
@@ -244,6 +248,7 @@ function blocked(from,dir,dist){
 }
 function setMode(m,initial){
   mode=m; $("mOrbit").setAttribute("aria-pressed",m==="orbit"); $("mWalk").setAttribute("aria-pressed",m==="walk");
+  xf&&xf.modeChanged();
   orbit.enabled=(m==="orbit");
   if(m==="walk"){
     setRoof(true,true);
@@ -300,6 +305,11 @@ function pickAt(useCenter){
 }
 function isVisible(o){ while(o){ if(!o.visible) return false; o=o.parent; } return true; }
 function itemIdOf(o){ while(o){ if(o.userData.itemId) return o.userData.itemId; o=o.parent; } return null; }
+function floorHitAt(nx,ny){   // the house floor under a screen point (ndc), or null
+  ndc.set(nx,ny); ray.setFromCamera(ndc,camera); ray.far=200;
+  const hits=ray.intersectObjects(house?[house]:[],true).filter(h=>isVisible(h.object)&&h.face&&h.face.normal.y>0.6&&!PASS.has(h.object.userData.matName)||(h.object.userData.matName==="Газон"));
+  return hits[0]?hits[0].point.clone():null;
+}
 function floorPoint(useCenter){
   if(useCenter) ndc.set(0,0);
   ray.setFromCamera(ndc,camera); ray.far=200;
@@ -309,11 +319,16 @@ function floorPoint(useCenter){
 }
 renderer.domElement.addEventListener("pointerdown",e=>{
   renderer.domElement.focus();
+  if(xf&&xf.gizmoPointer(e)) return;                 // a gizmo handle is under the pointer: the gizmo owns this press
   setNdc(e); ptr.down={x:e.clientX,y:e.clientY,t:performance.now(),id:e.pointerId};
   if(placing) return;
   if(mode==="orbit" && canWrite && !tool && !(e.pointerType==="touch"&&!e.isPrimary)){
     const h=pickAt(false); const iid=h&&itemIdOf(h.object);
-    if(iid){ orbit.enabled=false; ptr.drag={id:iid,start:items.get(iid).obj.position.clone(),moved:false}; select({kind:"item",id:iid}); }
+    if(iid){
+      if(e.shiftKey&&e.pointerType==="mouse"){ ptr.down=null; toggleSelect(iid); return; }
+      if(selIds.size>1&&selIds.has(iid)&&xf&&xf.beginDrag(e)){ ptr.down=null; return; }   // drag the whole group
+      orbit.enabled=false; ptr.drag={id:iid,start:items.get(iid).obj.position.clone(),prev:items.get(iid).doc,moved:false}; select({kind:"item",id:iid});
+    }
   }
   if(mode==="walk" && (e.pointerType!=="mouse")) { ptr.lookId=e.pointerId; ptr.last={x:e.clientX,y:e.clientY}; }
 },true);
@@ -331,7 +346,7 @@ renderer.domElement.addEventListener("pointermove",e=>{
 renderer.domElement.addEventListener("pointerup",e=>{
   const d=ptr.down; ptr.down=null; if(ptr.lookId===e.pointerId){ ptr.lookId=null; ptr.last=null; }
   if(ptr.drag){ const dr=ptr.drag; ptr.drag=null; orbit.enabled=(mode==="orbit");
-    if(dr.moved){ const it=items.get(dr.id); if(it) commitItem(dr.id,{x:r2(it.obj.position.x),y:r2(it.obj.position.y),z:r2(it.obj.position.z)}); sendPresence(true); }
+    if(dr.moved){ const it=items.get(dr.id); if(it){ pushUndo({t:"item",id:dr.id,prev:dr.prev}); commitItem(dr.id,{x:r2(it.obj.position.x),y:r2(it.obj.position.y),z:r2(it.obj.position.z)}); } sendPresence(true); }
     return; }
   if(!d) return;
   const moved=Math.hypot(e.clientX-d.x,e.clientY-d.y)>6||performance.now()-d.t>500;
@@ -393,6 +408,7 @@ function tick(){
   }
   if(mode==="orbit" && orbitMoved()) sendPresence();
   renderPeers();
+  xf&&xf.frame();
   for(const h of texItems) for(const m of h.texMats) Tex.setSpace(m,h.obj);
   renderer.render(scene,camera);
   requestAnimationFrame(tick);
@@ -412,18 +428,40 @@ function updateHint(){
     else add("Кликните по сцене, чтобы начать прогулку");
   } else {
     add(isTouch?"Палец — вращать, два пальца — приблизить. Тап по стене или предмету — выбрать":"Мышь: вращать, колесо — приблизить, правая кнопка — сдвинуть. Клик по стене или предмету — выбрать. Предмет можно тащить мышью");
+    if(canWrite&&!isTouch){ add("двигать · вращать · масштаб","G R S"); add("все клавиши","?"); }
   }
 }
 
 /* ---------------- selection panel ---------------- */
 function select(s){
-  selected=s; renderCtx(); highlight(); sendPresence(true);
+  selected=s; selIds.clear(); if(s?.kind==="item") selIds.add(s.id);
+  renderCtx(); highlight(); sendPresence(true);
 }
-let hlBox=null;
+/* several items at once (Shift+click, box, Ctrl+A); the last one is the main one */
+function selectItems(list,primary){
+  list=list.filter(id=>items.has(id));
+  if(!list.length){ select(null); return; }
+  selected={kind:"item",id:primary&&list.includes(primary)?primary:list[list.length-1]}; selIds.clear(); list.forEach(i=>selIds.add(i));
+  renderCtx(); highlight(); sendPresence(true);
+}
+function toggleSelect(id){
+  if(selected?.kind!=="item"){ selectItems([id]); return; }
+  if(selIds.has(id)){ const rest=[...selIds].filter(i=>i!==id); selectItems(rest,rest.includes(selected.id)?selected.id:null); }
+  else selectItems([...selIds,id],id);
+}
+let hlBoxes=[];
 function highlight(){
-  if(hlBox){ scene.remove(hlBox); hlBox=null; }
-  if(selected?.kind==="item"){ const it=items.get(selected.id); if(it){ hlBox=new THREE.BoxHelper(it.obj,0x2f9e86); scene.add(hlBox);} }
+  for(const b of hlBoxes) scene.remove(b);
+  hlBoxes=[];
+  if(selected?.kind!=="item") return;
+  const list=[...selIds].filter(i=>items.has(i));
+  if(list.length>30){      // one box around a big selection instead of hundreds
+    const bb=new THREE.Box3(), h=new THREE.Box3Helper(bb,0x2f9e86);
+    h.update=()=>{ bb.makeEmpty(); for(const id of list){ const it=items.get(id); if(it) bb.expandByObject(it.obj); } };
+    h.update(); scene.add(h); hlBoxes.push(h);
+  } else for(const id of list){ const b=new THREE.BoxHelper(items.get(id).obj,id===selected.id?0x2f9e86:0x7bd2c2); scene.add(b); hlBoxes.push(b); }
 }
+function refreshHl(){ for(const b of hlBoxes) if(b.update) b.update(); }
 function el(tag,attrs={},...kids){ const e=document.createElement(tag); for(const[k,v]of Object.entries(attrs)){ if(v===null||v===undefined) continue; if(k==="on") for(const[ev,fn]of Object.entries(v)) e.addEventListener(ev,fn); else if(k==="text") e.textContent=v; else e.setAttribute(k,v);} e.append(...kids.filter(Boolean)); return e; }
 
 /* paint targets: a whole material, one wall (group of meshes) or a single mesh */
@@ -542,6 +580,17 @@ function renderCtx(soft){
     }
     c.append(el("button",{class:"ghost",text:"Закрыть",on:{click:()=>select(null)}}));
     ctxS={sig,update(){ const k=upd(); if(pk&&!fromPicker) pk.set(k.color,k.finish); tt&&tt.sync(); }};
+  } else if(selIds.size>1){
+    const list=[...selIds].filter(i=>items.has(i)), sig=["multi",list.join(","),canWrite].join("|");
+    if(soft&&ctxS&&ctxS.sig===sig){ c.hidden=false; return; }
+    c.hidden=false; c.textContent="";
+    c.append(el("span",{class:"label",text:"Выбрано"}), el("h2",{text:"Предметов: "+list.length}));
+    if(canWrite&&xf){
+      c.append(xf.gizmoControls(), xf.groupPanel().el,
+        el("div",{class:"row"}, el("button",{text:"Копия",on:{click:()=>xf.duplicateSelection()}}), el("button",{class:"danger",text:"Удалить",on:{click:()=>xf.deleteSelection()}})));
+    } else c.append(el("div",{class:"meta",text:"Режим просмотра: менять предметы может только редактор."}));
+    c.append(el("button",{class:"ghost",text:"Снять выделение",title:"Alt+A",on:{click:()=>select(null)}}));
+    ctxS={sig,update(){}};
   } else {
     const it=items.get(selected.id); if(!it){ c.hidden=true; return; }
     const d=it.doc, def=d.type==="builtin"?LIB[d.key]:null, mdl=d.type==="model"?models.get(d.model):null;
@@ -553,7 +602,7 @@ function renderCtx(soft){
     c.append(el("span",{class:"label",text:"Предмет"}), el("h2",{text:title}));
     const sizeMeta=el("div",{class:"meta mono"}); c.append(sizeMeta);
     const showSize=()=>{ const sz=size(), tx=items.get(selected.id)?.doc.tex; sizeMeta.textContent=`${Math.round(sz.x*1000)} × ${Math.round(sz.z*1000)} × ${Math.round(sz.y*1000)} мм`+(tx&&Tex.exists(tx)?" · текстура «"+Tex.nameOf(tx)+"»":""); };
-    showSize(); let pk=null, tt=null;
+    showSize(); let pk=null, tt=null, xp=null;
     if(canWrite){
       c.append(el("div",{class:"row"},
         el("button",{text:"⟲ 90°",title:"Повернуть (Shift+R)",on:{click:()=>rotateItem(selected.id,-Math.PI/2)}}),
@@ -561,6 +610,7 @@ function renderCtx(soft){
         el("button",{text:"⟳ 15°",on:{click:()=>rotateItem(selected.id,Math.PI/12)}}),
         el("button",{text:"Переместить",on:{click:()=>startPlacing({moveId:selected.id})}})));
       const id=selected.id; let before=d;
+      if(xf){ xp=xf.panel(id); c.append(el("span",{class:"label",text:"Трансформация (G · R · S)"}), xf.gizmoControls(), xp.el); }
       const itemTex=()=>texTab({what:def?"этот предмет":"эту модель (у неё должна быть развёртка UV)",get:()=>items.get(id)?.doc.tex||null,finish:()=>items.get(id)?.doc.finish||null,
         apply(next,final,fin,key){ const cd=items.get(id); if(!cd) return;
           if(final){ pushUndo({t:"item",id,prev:before},key&&(id+key)); commitItem(id,Object.assign({tex:next},fin!==undefined?{finish:fin}:{})); before=items.get(id)?.doc; }
@@ -577,17 +627,13 @@ function renderCtx(soft){
         } else { tt=itemTex(); c.append(tt.el); }
       } else {
         c.append(el("span",{class:"label",text:"Текстура модели"})); tt=itemTex(); c.append(tt.el);
-        c.append(el("span",{class:"label",text:"Размер"}));
-        const w=el("input",{type:"number",min:"50",step:"10",value:String(Math.round(size().x*1000)),"aria-label":"Ширина, мм",id:"itemW",style:"width:100px"});
-        c.append(el("div",{class:"row"},w,el("span",{class:"meta",text:"мм по ширине"}),
-          el("button",{text:"Применить",on:{click:()=>{ const sx=size().x, v=parseFloat(w.value); if(v>0&&sx>0) commitItem(selected.id,{s:r2((items.get(selected.id).doc.s||1)*(v/1000)/sx)}); }}})));
       }
       c.append(el("div",{class:"row"},
         el("button",{text:"Копия",on:{click:()=>duplicateItem(selected.id)}}),
-        el("button",{class:"danger",text:"Удалить",on:{click:()=>removeItem(selected.id)}})));
+        el("button",{class:"danger",text:"Удалить",title:"X",on:{click:()=>xf?xf.deleteSelection():removeItem(selected.id)}})));
     }
     c.append(el("button",{class:"ghost",text:"Закрыть",on:{click:()=>select(null)}}));
-    ctxS={sig,update(){ showSize(); const cur=items.get(selected?.id)?.doc; if(pk&&cur&&!fromPicker) pk.set(cur.color||def.color,cur.finish||null); tt&&tt.sync(); }};
+    ctxS={sig,update(){ showSize(); xp&&xp.update(); const cur=items.get(selected?.id)?.doc; if(pk&&cur&&!fromPicker) pk.set(cur.color||def.color,cur.finish||null); tt&&tt.sync(); }};
   }
 }
 
@@ -643,11 +689,25 @@ function buildItem(doc){
   }
   return loadModel(doc.model).then(tpl=>tpl?tpl.clone(true):null);
 }
+const NUM=v=>typeof v==="number"&&Number.isFinite(v);
+/* position x,y,z (m), rotation rx,ry,rz (rad, order YXZ), scale sx,sy,sz. Items saved before transforms have r (= ry) and s (uniform scale) only */
+function normDoc(d){
+  const o=Object.assign({},d), u=NUM(d.s)?d.s:1;
+  if(!NUM(o.rx)) o.rx=0; if(!NUM(o.ry)) o.ry=NUM(d.r)?d.r:0; if(!NUM(o.rz)) o.rz=0;
+  if(!NUM(o.sx)) o.sx=u; if(!NUM(o.sy)) o.sy=u; if(!NUM(o.sz)) o.sz=u;
+  return o;
+}
+function applyObjXf(obj,d,skipPos){
+  if(!skipPos) obj.position.set(d.x||0,d.y||0,d.z||0);
+  obj.rotation.set(d.rx||0,d.ry||0,d.rz||0,"YXZ"); obj.scale.set(d.sx||1,d.sy||1,d.sz||1);
+}
+const localBusy=id=>(ptr.drag&&ptr.drag.id===id)||(placing&&placing.moveId===id)||(xf&&xf.touching(id));
 function syncItem(id,doc){
+  doc=normDoc(doc);
   let it=items.get(id);
   const needRebuild=!it||it.doc.type!==doc.type||it.doc.key!==doc.key||it.doc.model!==doc.model||(doc.type==="builtin"&&(it.doc.color!==doc.color||it.doc.finish!==doc.finish));
   if(needRebuild){
-    const token=Symbol(); const holder=it||{doc,obj:new THREE.Group(),token}; holder.token=token; holder.doc=doc;
+    const token=Symbol(); const holder=it||{doc,obj:new THREE.Group(),token}; holder.token=token; holder.doc=doc; holder.obj.rotation.order="YXZ";
     if(!it){ holder.obj.userData.itemId=id; itemsRoot.add(holder.obj); items.set(id,holder); }
     if(doc.type!=="builtin"&&doc.model&&!modelReady.has(doc.model)&&models.has(doc.model)){ holder.obj.clear(); holder.obj.add(modelPlaceholder(doc.model)); }
     Promise.resolve(buildItem(doc)).then(g=>{
@@ -660,23 +720,30 @@ function syncItem(id,doc){
   }
   it.doc=doc;
   if(!needRebuild&&JSON.stringify(doc.tex||null)!==it.texSig) applyItemTex(it);
-  if(!(ptr.drag&&ptr.drag.id===id)&&!(placing&&placing.moveId===id)){
-    it.obj.position.set(doc.x||0,doc.y||0,doc.z||0);
-  }
-  it.obj.rotation.y=doc.r||0; it.obj.scale.setScalar(doc.s||1);
-  if(selected?.kind==="item"&&selected.id===id){ highlight(); }
+  if(!(xf&&xf.touching(id))) applyObjXf(it.obj,doc,(ptr.drag&&ptr.drag.id===id)||(placing&&placing.moveId===id));
+  if(selIds.has(id)) highlight();
 }
-function dropItem(id){ const it=items.get(id); if(!it) return; clearItemTex(it); itemsRoot.remove(it.obj); items.delete(id); if(selected?.id===id) select(null); }
+function dropItem(id){
+  const it=items.get(id); if(!it) return; clearItemTex(it); itemsRoot.remove(it.obj); items.delete(id);
+  if(selIds.has(id)){
+    selIds.delete(id);
+    if(selected?.kind==="item"&&selected.id===id){ const rest=[...selIds]; if(rest.length) selectItems(rest); else select(null); } else { highlight(); renderCtx(); }
+  }
+}
+function removeMany(list){ selIds.clear(); select(null); list.forEach(dropItem); sendOk(Sync.removeItems(list)); }
 function commitItem(id,patch){
   const it=items.get(id); if(!it) return;
   const doc=Object.assign({},it.doc,patch,{at:Date.now(),by:myId});
+  if("r" in patch&&!("ry" in patch)) doc.ry=patch.r;
+  if("s" in patch&&!("sx" in patch)) doc.sx=doc.sy=doc.sz=patch.s;
+  doc.r=doc.ry; doc.s=Math.abs(doc.sy);
   syncItem(id,doc); if(selected?.id===id) renderCtx(true);
   sendOk(Sync.commitItem(id,doc));
 }
-function rotateItem(id,da){ const it=items.get(id); if(it) commitItem(id,{r:r2(((it.doc.r||0)+da)%(Math.PI*2))}); }
+function rotateItem(id,da){ const it=items.get(id); if(it) commitItem(id,{ry:r2(((it.doc.ry||0)+da)%(Math.PI*2))}); }
 function removeItem(id){ dropItem(id); sendOk(Sync.removeItem(id)); }
-function duplicateItem(id){ const it=items.get(id); if(!it) return; const nid=rid(); const d=Object.assign({},it.doc,{x:r2((it.doc.x||0)+0.4),z:r2((it.doc.z||0)+0.4)}); commitNew(nid,d); select({kind:"item",id:nid}); }
-function commitNew(id,doc){ doc=Object.assign({},doc,{by:myId,at:Date.now()}); syncItem(id,doc); sendOk(Sync.commitItem(id,doc)); }
+function duplicateItem(id){ if(selIds.size>1&&selIds.has(id)&&xf){ xf.duplicateSelection(); return; } const it=items.get(id); if(!it) return; const nid=rid(); const d=Object.assign({},it.doc,{x:r2((it.doc.x||0)+0.4),z:r2((it.doc.z||0)+0.4)}); commitNew(nid,d); select({kind:"item",id:nid}); }
+function commitNew(id,doc){ doc=normDoc(Object.assign({},doc,{by:myId,at:Date.now()})); doc.r=doc.ry; doc.s=Math.abs(doc.sy); syncItem(id,doc); sendOk(Sync.commitItem(id,doc)); }
 
 /* placing */
 function startPlacing(p){
@@ -693,19 +760,22 @@ function startPlacing(p){
 function movePlacing(center){
   if(!placing?.obj) return;
   const p=floorPoint(center||(mode==="walk"&&(isTouch||document.pointerLockElement)));
-  if(p){ placing.obj.position.copy(p); placing.last=p.clone(); }
+  if(p){ placing.obj.position.copy(p); placing.obj.position.y+=placing.lift||0; placing.last=p.clone(); }
 }
+/* PageUp / PageDown while an item is in the hands: the same spot, a little higher or lower */
+function liftPlacing(){ if(placing?.obj&&placing.last){ placing.obj.position.copy(placing.last); placing.obj.position.y+=placing.lift||0; } }
 function dropPlacing(){
   if(!placing) return; const p=placing.last||placing.obj.position;
-  if(placing.moveId){ const id=placing.moveId, it=items.get(id), rr=it?r2(it.obj.rotation.y):0; placing=null; commitItem(id,{x:r2(p.x),y:r2(p.y),z:r2(p.z),r:rr}); renderTools(); }
-  else { const doc=Object.assign({},placing.doc,{x:r2(p.x),y:r2(p.y),z:r2(p.z),r:placing.doc.r||0,s:placing.doc.s||1}); scene.remove(placing.obj); placing=null; const id=rid(); commitNew(id,doc); pushUndo({t:"item",id,prev:null});
+  const lift=placing.lift||0;
+  if(placing.moveId){ const id=placing.moveId, it=items.get(id), rr=it?r2(it.obj.rotation.y):0; placing=null; commitItem(id,{x:r2(p.x),y:r2(p.y+lift),z:r2(p.z),r:rr}); renderTools(); }
+  else { const doc=Object.assign({},placing.doc,{x:r2(p.x),y:r2(p.y+lift),z:r2(p.z),r:placing.doc.r||0,s:placing.doc.s||1}); scene.remove(placing.obj); placing=null; const id=rid(); commitNew(id,doc); pushUndo({t:"item",id,prev:null});
     if(tool==="add"){ lastAddRot=doc.r; setTimeout(startAdd,30); } else select({kind:"item",id}); }
   placedFromOrbit=true; updateHint(); renderPlaceBar();
 }
 function cancelPlacing(silent){
   if(!placing) return;
   if(placing.temp) scene.remove(placing.obj);
-  else { const it=items.get(placing.moveId); if(it){ it.obj.position.set(it.doc.x||0,it.doc.y||0,it.doc.z||0); it.obj.rotation.y=it.doc.r||0; } }
+  else { const it=items.get(placing.moveId); if(it) applyObjXf(it.obj,it.doc); }
   placing=null; if(!silent){ updateHint(); renderPlaceBar(); }
 }
 function renderPlaceBar(){
@@ -830,15 +900,16 @@ function placeholder(failed){
   return el("div",{class:"ph"},cubeIcon(),el("span",{text:failed?"Нет превью":"Готовлю превью…"}));
 }
 /* one grid card. src() -> url | null, failed() -> bool, dims() -> [w,d,h] | null */
-function makeCard({id,kind,name,dims,extra,src,failed,onPlace,onInfo,build}){
+function makeCard({id,kind,name,dims,extra,path,src,failed,onPlace,onInfo,onSelect,selected:isSel,build}){
   const thumb=el("div",{class:"thumb"});
-  const main=el("button",{class:"card-main",title:"Поставить в сцену"},thumb,el("b",{class:"cn"}),el("span",{class:"mono cd"}),extra?el("span",{class:"mono ce"}):null);
+  const main=el("button",{class:"card-main",title:"Поставить в сцену"},thumb,el("b",{class:"cn"}),el("span",{class:"mono cd"}),extra?el("span",{class:"mono ce"}):null,path?el("span",{class:"cp"}):null);
   const info=el("button",{class:"card-i ghost",text:"i",title:"Предпросмотр","aria-label":"Предпросмотр"});
   const root=el("div",{class:"card"},main,info);
   const patch=()=>{
     const s=src(); main.querySelector(".cn").textContent=name();
     main.querySelector(".cd").textContent=fmtDims(dims());
     if(extra) main.querySelector(".ce").textContent=extra();
+    if(path){ const pp=path(); const cp=main.querySelector(".cp"); cp.textContent=pp; cp.title=pp; }
     const cur=thumb.firstChild;
     if(s){
       if(cur&&cur.tagName==="IMG"&&cur.dataset.s===s) return;
@@ -848,15 +919,183 @@ function makeCard({id,kind,name,dims,extra,src,failed,onPlace,onInfo,build}){
       thumb.prepend(im);
     } else { thumb.querySelectorAll("img").forEach(n=>n.remove()); const f=failed(); const p=thumb.querySelector(".ph"); if(!p||p.dataset.f!==String(f)){ p?.remove(); const n=placeholder(f); n.dataset.f=String(f); thumb.prepend(n); } }
   };
-  main.title=canWrite?"Поставить в сцену":"Предпросмотр"; main.onclick=canWrite?onPlace:onInfo; info.onclick=onInfo;
+  main.title=canWrite?"Поставить в сцену"+(onSelect?" (Shift+клик — выделить)":""):"Предпросмотр";
+  main.onclick=e=>{ if(onSelect&&canWrite&&e.shiftKey){ e.preventDefault(); onSelect(); return; } (canWrite?onPlace:onInfo)(); }; info.onclick=onInfo;
+  if(isSel) root.classList.add("sel");
   bindSpin(root,thumb,build);
+  if(kind==="up"&&canWrite&&!isTouch) bindModelDrag(root,id);
   cards.set(kind+":"+id,{patch}); patch();
   return root;
 }
 
 const modelThumbSrc=m=>m.thumb?"/uploads/"+m.thumb+"?t="+(m.thumbAt||0):null;
+
+/* ---------------- folders of the uploaded models ---------------- */
+let libFolder=null;                      // folder being looked at (null = all models, the root)
+const libSel=new Set();                  // models selected with Shift+click, moved together
+const MAX_FOLDER_DEPTH=3;
+const folderOf=m=>folders.has(m.folder)?m.folder:null;
+const folderDepth=id=>{ let n=0; for(let f=id;f&&folders.has(f)&&n<10;f=folders.get(f).parent) n++; return n; };
+const folderKids=id=>[...folders.entries()].filter(([,f])=>(f.parent||null)===id).sort((a,b)=>libSort==="name"?String(a[1].name).localeCompare(String(b[1].name),"ru"):((a[1].order||0)-(b[1].order||0))||String(a[1].name).localeCompare(String(b[1].name),"ru")).map(([k])=>k);
+const folderTree=id=>{ const out=[id]; for(let i=0;i<out.length;i++) out.push(...folderKids(out[i])); return out; };
+const folderHeight=id=>1+Math.max(0,...folderKids(id).map(folderHeight));
+const folderChain=id=>{ const c=[]; for(let f=id;f&&folders.has(f)&&c.length<10;f=folders.get(f).parent) c.unshift(f); return c; };
+const folderPath=id=>folderChain(id).map(f=>folders.get(f).name).join(" › ");
+const modelsIn=id=>[...models.entries()].filter(([,m])=>folderOf(m)===id).map(([k])=>k);
+const treeModels=id=>{ const set=new Set(folderTree(id)); return [...models.entries()].filter(([,m])=>set.has(folderOf(m))).map(([k])=>k); };
+const sceneUses=list=>{ const set=new Set(list); let n=0; for(const h of items.values()) if(h.doc.model&&set.has(h.doc.model)) n++; return n; };
+const plural=(n,a,b,c)=>{ const m=n%100, k=n%10; return n+" "+((m>10&&m<20)?c:k===1?a:(k>=2&&k<=4)?b:c); };
+const modelsWord=n=>plural(n,"модель","модели","моделей");
+let libRaf=0;
+const scheduleLib=()=>{ if(libRaf) return; libRaf=requestAnimationFrame(()=>{ libRaf=0; renderLib(); }); };
+const FOLDER_ERR={forbidden:"Менять папки может только редактор.",too_deep:"Папки вкладываются не глубже трёх уровней.",cycle:"Нельзя переместить папку внутрь самой себя.",too_many_folders:"Слишком много папок.",in_use:"Модели используются в сцене.",network:"Нет связи с сервером."};
+const folderErr=e=>FOLDER_ERR[e&&e.code]||"Не получилось выполнить действие.";
+
+/* in-page dialog: title, body nodes, buttons [{label,cls,run}] (run returns false to keep the dialog open); Esc / click outside = cancel */
+function modal(title,body,buttons,{onCancel}={}){
+  const prev=document.activeElement, msg=el("div",{class:"meta",role:"status"});
+  const root=el("div",{class:"pv-back"});
+  const done=()=>{ document.removeEventListener("keydown",key,true); root.remove(); try{ prev&&prev.focus(); }catch{} };
+  const btns=el("div",{class:"bigwarn-btns"});
+  const mk=b=>{ const x=el("button",{class:b.cls||"",text:b.label}); x.onclick=async()=>{ x.disabled=true; let r; try{ r=await b.run?.(msg); }catch(e){ msg.textContent=folderErr(e); r=false; } x.disabled=false; if(r!==false) done(); }; return x; };
+  for(const b of buttons) btns.append(mk(b));
+  root.append(el("div",{class:"panel pv-dlg",role:"dialog","aria-modal":"true"},el("h2",{text:title}),...body,msg,btns));
+  const key=e=>{ if(e.key==="Escape"){ e.stopPropagation(); onCancel?.(); done(); } else if(e.key!=="Tab"&&!e.target.closest?.("input")) e.stopPropagation(); };
+  root.addEventListener("pointerdown",e=>{ if(e.target===root){ onCancel?.(); done(); } });
+  document.addEventListener("keydown",key,true); document.body.append(root);
+  (root.querySelector("input")||btns.lastChild)?.focus?.();
+  return {root,msg,close:done};
+}
+/* asks for a folder name; resolves to the trimmed name or null */
+function askFolderName(title,initial){
+  return new Promise(res=>{
+    const inp=el("input",{type:"text",maxlength:"60","aria-label":"Название папки",class:"pv-name",value:initial||""});
+    const save=()=>{ const n=inp.value.trim().slice(0,60); if(!n) return false; res(n); };
+    const d=modal(title,[inp],[{label:"Отмена",cls:"ghost",run:()=>res(null)},{label:"Сохранить",cls:"primary",run:save}],{onCancel:()=>res(null)});
+    inp.onkeydown=e=>{ if(e.key==="Enter"){ e.preventDefault(); d.root.querySelector(".primary").click(); } };
+    inp.select();
+  });
+}
+/* folder chooser: resolves to a folder id, null (the root) or undefined (cancelled). `bad(id)` greys a folder out */
+function pickFolder(title,bad){
+  return new Promise(res=>{
+    let d; const list=el("div",{class:"fp-list"}), choose=v=>{ res(v); d.close(); };
+    const row=(id,label,depth)=>{ const dis=id!==null&&bad&&bad(id); const b=el("button",{class:"fp-row",text:label,"data-folder":id===null?"root":id,disabled:dis?"":null}); b.style.paddingLeft=(10+depth*16)+"px"; b.onclick=()=>choose(id); list.append(b); };
+    row(null,"Все модели (корень)",0);
+    const walk=(parent,depth)=>{ for(const id of folderKids(parent)){ row(id,"📁 "+folders.get(id).name,depth); walk(id,depth+1); } };
+    walk(null,1);
+    d=modal(title,[list],[{label:"Отмена",cls:"ghost",run:()=>res(undefined)}],{onCancel:()=>res(undefined)});
+  });
+}
+async function moveModelsTo(ids,dest){
+  ids=ids.filter(i=>models.has(i)&&folderOf(models.get(i))!==dest); if(!ids.length) return;
+  try{ await Sync.moveModels(ids,dest); libSel.clear(); toast("Перенесено: "+modelsWord(ids.length)+" → "+(dest?folders.get(dest)?.name||"папку":"Все модели")); }
+  catch(e){ toast(folderErr(e)); }
+}
+function folderMenu(anchor,list){
+  document.querySelectorAll(".fmenu").forEach(m=>m.remove());
+  const m=el("div",{class:"fmenu panel",role:"menu"}); const r=anchor.getBoundingClientRect();
+  for(const [label,fn,cls] of list) m.append(el("button",{class:"ghost "+(cls||""),role:"menuitem",text:label,on:{click:()=>{ close(); fn(); }}}));
+  document.body.append(m); m.style.left=Math.min(r.left,innerWidth-m.offsetWidth-8)+"px"; m.style.top=Math.min(r.bottom+4,innerHeight-m.offsetHeight-8)+"px";
+  const close=()=>{ m.remove(); document.removeEventListener("pointerdown",out,true); document.removeEventListener("keydown",esc,true); };
+  const out=e=>{ if(!m.contains(e.target)) close(); }, esc=e=>{ if(e.key==="Escape"){ e.stopPropagation(); close(); } };
+  setTimeout(()=>{ document.addEventListener("pointerdown",out,true); document.addEventListener("keydown",esc,true); },0);
+  m.querySelector("button")?.focus();
+}
+async function newFolder(parent){
+  if(folderDepth(parent)>=MAX_FOLDER_DEPTH){ toast("Папки вкладываются не глубже трёх уровней."); return; }
+  const n=await askFolderName("Новая папка"+(parent?" в «"+folders.get(parent).name+"»":""),""); if(!n) return;
+  try{ const r=await Sync.addFolder(n,parent); if(r?.id&&r.doc) folders.set(r.id,r.doc); renderLib(); }catch(e){ toast(folderErr(e)); }
+}
+async function renameFolder(id){
+  const f=folders.get(id); if(!f) return; const n=await askFolderName("Переименовать папку",f.name); if(!n||n===f.name) return;
+  try{ const r=await Sync.patchFolder(id,{name:n}); if(r?.doc) folders.set(id,r.doc); renderLib(); }catch(e){ toast(folderErr(e)); }
+}
+async function moveFolder(id){
+  const sub=new Set(folderTree(id)), h=folderHeight(id);
+  const dest=await pickFolder("Переместить «"+folders.get(id).name+"» в…",t=>sub.has(t)||folderDepth(t)+h>MAX_FOLDER_DEPTH); if(dest===undefined) return;
+  try{ await Sync.patchFolder(id,{parent:dest}); }catch(e){ toast(folderErr(e)); }
+}
+/* delete: models go to the parent folder, or are deleted together with the folder (only if none of them is in the scene) */
+function deleteFolder(id){
+  const f=folders.get(id); if(!f) return; const inside=treeModels(id), used=sceneUses(inside), subs=folderTree(id).length-1;
+  const info=el("div",{},"Папка «"+f.name+"»: "+modelsWord(inside.length)+(subs?", вложенных папок: "+subs:"")+(inside.length?"; в сцене они используются в предметах: "+used+".":"."));
+  const del=used?null:{label:"Удалить вместе с моделями",cls:"danger",run:async()=>{ try{ await Sync.removeFolder(id,"models"); }catch(e){ if(e.code==="in_use") return (msgBox.textContent="Нельзя удалить: модели используются в сцене."),false; throw e; } }};
+  const body=[info]; if(used) body.push(el("div",{class:"meta",text:"«Удалить вместе с моделями» недоступно: эти модели стоят в сцене ("+used+"). Сначала уберите такие предметы или перенесите модели."}));
+  let msgBox=null;
+  const d=modal("Удалить папку?",body,[{label:"Отмена",cls:"ghost"},{label:"Переместить модели в родительскую папку",cls:"primary",run:async()=>{ await Sync.removeFolder(id,"move"); }},...(del?[del]:[])]);
+  msgBox=d.msg;
+}
+function renameInline(card,id){
+  const nameEl=card.querySelector(".cn"), f=folders.get(id); if(!f||!canWrite) return;
+  const inp=el("input",{type:"text",maxlength:"60","aria-label":"Название папки",class:"f-rename",value:f.name}); let finished=false;
+  const end=async save=>{ if(finished) return; finished=true; const n=inp.value.trim().slice(0,60); if(save&&n&&n!==f.name){ try{ const r=await Sync.patchFolder(id,{name:n}); if(r?.doc) folders.set(id,r.doc); }catch(e){ toast(folderErr(e)); } } renderLib(); };
+  inp.onkeydown=e=>{ e.stopPropagation(); if(e.key==="Enter"){ e.preventDefault(); end(true); } else if(e.key==="Escape"){ end(false); } };
+  inp.onblur=()=>end(true); inp.onclick=e=>e.stopPropagation(); inp.ondblclick=e=>e.stopPropagation();
+  nameEl.replaceWith(inp); inp.focus(); inp.select();
+}
+const FOLDER_SVG='<svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.2l2 2.2h8.8A1.5 1.5 0 0 1 21 8.7v8.8a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>';
+function folderCard(id){
+  const f=folders.get(id), n=treeModels(id).length;
+  const ic=el("div",{class:"thumb fthumb"}); ic.innerHTML=FOLDER_SVG;
+  const main=el("button",{class:"card-main",title:"Открыть папку"},ic,el("b",{class:"cn",text:f.name}),el("span",{class:"mono cd",text:modelsWord(n)}));
+  const root=el("div",{class:"card fcard","data-folder":id,"data-drop":id},main);
+  let openT=0;
+  const open=()=>{ libFolder=id; libSel.clear(); libQuery=""; $("libSearch").value=""; renderLib(); };
+  main.onclick=()=>{ clearTimeout(openT); if(canWrite) openT=setTimeout(open,240); else open(); };   // an editor may double-click the name to rename: the single click waits a moment
+  if(canWrite){
+    main.addEventListener("dblclick",e=>{ clearTimeout(openT); if(e.target.closest(".cn")){ e.preventDefault(); renameInline(root,id); } else open(); });
+    const more=el("button",{class:"card-i ghost",text:"⋯",title:"Действия с папкой","aria-label":"Действия с папкой","aria-haspopup":"menu",style:"font:600 16px/20px system-ui"});
+    more.onclick=e=>{ e.stopPropagation(); folderMenu(more,[["Переименовать",()=>renameInline(root,id)],["Переместить в…",()=>moveFolder(id)],["Удалить…",()=>deleteFolder(id),"danger"]]); };
+    root.append(more);
+  }
+  return root;
+}
+/* pointer-driven drag of a model card (mouse; on a phone there is "Переместить в…" in the model window). Drop on a folder card or a breadcrumb. */
+function bindModelDrag(card,id){
+  card.addEventListener("pointerdown",e=>{
+    if(e.pointerType!=="mouse"||e.button!==0||e.shiftKey||e.target.closest(".card-i")) return;
+    const x0=e.clientX,y0=e.clientY; let ghost=null,over=null,ids=null;
+    const clear=()=>{ over?.classList.remove("drop"); over=null; ghost?.remove(); ghost=null; document.body.classList.remove("dragging"); removeEventListener("pointermove",move,true); removeEventListener("pointerup",up,true); removeEventListener("keydown",key,true); };
+    const move=ev=>{
+      if(!ghost){ if(Math.hypot(ev.clientX-x0,ev.clientY-y0)<7) return;
+        ids=libSel.has(id)?[...libSel]:[id]; stopSpin();
+        ghost=el("div",{class:"drag-ghost",text:ids.length>1?modelsWord(ids.length):(models.get(id)?.name||"Модель")}); document.body.append(ghost); document.body.classList.add("dragging"); }
+      ghost.style.left=(ev.clientX+12)+"px"; ghost.style.top=(ev.clientY+12)+"px";
+      const t=document.elementFromPoint(ev.clientX,ev.clientY)?.closest("[data-drop]")||null;
+      if(t!==over){ over?.classList.remove("drop"); over=t; over?.classList.add("drop"); }
+    };
+    const up=()=>{
+      const was=!!ghost, target=over; const list=ids; clear();
+      if(!was) return;
+      const stop=ev=>{ ev.stopPropagation(); ev.preventDefault(); }; addEventListener("click",stop,true); setTimeout(()=>removeEventListener("click",stop,true),60);   // the drag must not also "place" the model
+      if(target) moveModelsTo(list,target.dataset.drop==="root"?null:target.dataset.drop);
+    };
+    const key=ev=>{ if(ev.key==="Escape"){ ev.stopPropagation(); clear(); } };
+    addEventListener("pointermove",move,true); addEventListener("pointerup",up,true); addEventListener("keydown",key,true);
+  });
+}
+function crumbBar(){
+  const bar=el("div",{class:"crumbs"});
+  if(libFolder) bar.append(el("button",{class:"ghost crumb-back",text:"← Назад",title:"На уровень выше",on:{click:()=>{ libFolder=folders.get(libFolder)?.parent||null; libSel.clear(); renderLib(); }}}));
+  const nav=el("nav",{class:"crumb-nav","aria-label":"Путь"});
+  const crumb=(id,label,last)=>{ const b=el("button",{class:"ghost crumb"+(last?" cur":""),text:label,"data-drop":id===null?"root":id,on:{click:()=>{ libFolder=id; libSel.clear(); renderLib(); }}}); if(last) b.setAttribute("aria-current","page"); nav.append(b); };
+  const chain=folderChain(libFolder);
+  crumb(null,"Все модели",!chain.length);
+  chain.forEach((fid,i)=>{ nav.append(el("span",{class:"sep",text:"›"})); crumb(fid,folders.get(fid).name,i===chain.length-1); });
+  bar.append(nav);
+  if(canWrite) bar.append(el("button",{id:"bNewFolder",text:"+ Папка",title:folderDepth(libFolder)>=MAX_FOLDER_DEPTH?"Глубже трёх уровней нельзя":"Новая папка здесь",disabled:folderDepth(libFolder)>=MAX_FOLDER_DEPTH?"":null,on:{click:()=>newFolder(libFolder)}}));
+  return bar;
+}
+function selBar(){
+  const n=libSel.size; if(!n||!canWrite) return null;
+  return el("div",{class:"selbar"},el("span",{text:"Выбрано: "+modelsWord(n)}),
+    el("button",{text:"Переместить в…",on:{click:async()=>{ const dest=await pickFolder("Переместить в…"); if(dest!==undefined) moveModelsTo([...libSel],dest); }}}),
+    el("button",{class:"ghost",text:"Снять",on:{click:()=>{ libSel.clear(); renderLib(); }}}));
+}
 function renderLib(){
   const L=$("libList"); stopSpin(); L.textContent=""; cards.clear();
+  document.querySelectorAll(".fmenu").forEach(m=>m.remove());
   $("tBase").setAttribute("aria-pressed",libTab==="base"); $("tUp").setAttribute("aria-pressed",libTab==="up"); $("tTex").setAttribute("aria-pressed",libTab==="tex");
   $("uploadRow").hidden=(libTab==="base"||!canWrite); $("libSort").hidden=(libTab!=="up");
   $("bUpload").hidden=libTab!=="up"; $("upNote").hidden=libTab!=="up"; $("bNewTex").hidden=libTab!=="tex";
@@ -876,12 +1115,22 @@ function renderLib(){
       onInfo:()=>openTexInfo(s)}));
     if(!list.length) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
   } else {
-    const list=[...models.entries()].filter(([,m])=>hit(m.name||"Модель"));
+    if(libFolder&&!folders.has(libFolder)) libFolder=null;
+    const searching=!!q;
+    let list=[...models.entries()].filter(([,m])=>hit(m.name||"Модель")&&(searching||folderOf(m)===libFolder));
     list.sort(libSort==="name"?(a,b)=>String(a[1].name).localeCompare(String(b[1].name),"ru"):(a,b)=>(b[1].at||0)-(a[1].at||0));
-    if(!models.size) L.append(el("div",{class:"meta empty",text:"Пока ничего не загружено. Сгенерируйте мебель по фото в нейросети, скачайте .glb и загрузите сюда."}));
-    else if(!list.length) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
+    if(!searching){
+      L.append(crumbBar());
+      for(const fid of folderKids(libFolder)) L.append(folderCard(fid));
+    } else L.append(el("div",{class:"meta empty",text:"Поиск по всем папкам."}));
+    const sb=selBar(); if(sb) L.append(sb);
+    if(!models.size&&!folders.size) L.append(el("div",{class:"meta empty",text:"Пока ничего не загружено. Сгенерируйте мебель по фото в нейросети, скачайте .glb и загрузите сюда."}));
+    else if(!list.length&&searching) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
+    else if(!list.length&&!folderKids(libFolder).length) L.append(el("div",{class:"meta empty",text:libFolder?"В этой папке пока пусто. Загрузите модель или перетащите сюда из другой папки.":"Пока ничего не загружено."}));
     for(const[id]of list){
       L.append(makeCard({id,kind:"up",name:()=>models.get(id)?.name||"Модель",dims:()=>models.get(id)?.dims||null,extra:()=>fmtSize(models.get(id)?.sizeBytes||0),
+        path:searching?()=>{ const m=models.get(id); return m&&folderOf(m)?folderPath(folderOf(m)):"Все модели"; }:null,
+        selected:libSel.has(id),onSelect:()=>{ if(libSel.has(id)) libSel.delete(id); else libSel.add(id); renderLib(); },
         src:()=>{ const m=models.get(id); return m?modelThumbSrc(m):null; },failed:()=>thumbJobs.failed.has(id),
         onPlace:()=>startPlacing({doc:{type:"model",model:id,r:0,s:1}}),onInfo:()=>openPreview({kind:"up",id}),
         build:()=>{ const m=models.get(id); return m?loadFresh(m):null; }}));
@@ -914,16 +1163,17 @@ async function openPreview(ref){
   if(!isBase&&!cur()) return;
   const title=()=>isBase?LIB[ref.key].name:(cur()?.name||"Модель");
   const dimsNow=()=>isBase?dimsOfBase(ref.key):(cur()?.dims||null);
+  const folderLine=el("div",{class:"meta pv-folder"});
   const h2=el("h2",{id:"pvTitle",text:title()}), dimsEl=el("div",{class:"meta mono"}), msg=el("div",{class:"meta",role:"status"});
   const view=el("div",{class:"pv-view"},el("div",{class:"pv-load",text:"Загружаю модель…"}));
   const actions=el("div",{class:"row pv-actions"}), confirmRow=el("div",{class:"row pv-confirm",hidden:""}), headRow=el("div",{class:"pv-head"},h2);
   const close=el("button",{class:"ghost",text:"✕","aria-label":"Закрыть",on:{click:closePreview}}); headRow.append(close);
   const dlg=el("div",{class:"panel pv-dlg",role:"dialog","aria-modal":"true","aria-labelledby":"pvTitle"},headRow,view,
     el("div",{class:"meta",text:"Крутите мышью или пальцем, колесо или щипок — масштаб."}),dimsEl,
-    isBase?null:el("div",{class:"meta mono",text:fmtSize(cur().sizeBytes||0)}),actions,confirmRow,msg);
+    isBase?null:el("div",{class:"meta mono",text:fmtSize(cur().sizeBytes||0)}),isBase?null:folderLine,actions,confirmRow,msg);
   const root=el("div",{id:"pv",class:"pv-back"},dlg); document.body.append(root);
   root.addEventListener("pointerdown",e=>{ if(e.target===root) closePreview(); });
-  const upd=()=>{ if(!isBase&&!cur()){ closePreview(); toast("Модель удалена."); return; } h2.textContent=title(); dimsEl.textContent=fmtDims(dimsNow()); };
+  const upd=()=>{ if(!isBase&&!cur()){ closePreview(); toast("Модель удалена."); return; } h2.textContent=title(); dimsEl.textContent=fmtDims(dimsNow()); if(!isBase){ const fo=folderOf(cur()); folderLine.textContent="Папка: "+(fo?folderPath(fo):"Все модели"); } };
   upd();
 
   const place=el("button",{class:"primary",text:"Поставить в сцену"});
@@ -958,7 +1208,8 @@ async function openPreview(ref){
       no.onclick=()=>{ confirmRow.hidden=true; confirmRow.textContent=""; actions.hidden=false; };
       yes.onclick=async()=>{ yes.disabled=true; try{ await Sync.removeModel(ref.id); closePreview(); }catch(e){ msg.textContent="Не удалось удалить модель."; yes.disabled=false; } };
     };
-    actions.append(ren,del);
+    const mv=el("button",{text:"Переместить в…",on:{click:async()=>{ const dest=await pickFolder("Переместить «"+title()+"» в…"); if(dest===undefined) return; try{ await Sync.moveModels([ref.id],dest); }catch(e){ msg.textContent=folderErr(e); } }}});
+    actions.append(mv,ren,del);
   }
 
   /* own renderer, created on open and released on close */
@@ -1027,7 +1278,7 @@ $("fileIn").onchange=async()=>{
       try{ const wrap=normalizeModel(gl.scene); try{ thumb=await Thumbs.renderThumb(wrap); } finally{ Thumbs.disposeObject(wrap); } }catch(e){ console.warn("thumb",e); Thumbs.disposeObject(gl.scene); }
     }
     houseProgress("Загружаю «"+name+"» 0%",0);
-    const r=await Sync.upload(f,name,upProgressCb("Загружаю «"+name+"»",f.size));
+    const r=await Sync.upload(f,name,upProgressCb("Загружаю «"+name+"»",f.size),libFolder);
     houseProgress("");
     if(r?.id&&r.doc) models.set(r.id,r.doc);
     libTab="up"; renderLib();
@@ -1259,6 +1510,12 @@ function pipette(){
 function doUndo(){
   const u=undo.pop(); if(!u){ toast("Нечего отменять."); return; }
   if(u.t==="target"){ if(u.prev) setTarget(u.tgt,u.prev.color,u.prev.finish,true,u.prev.tex); else resetTarget(u.tgt,true); }
+  else if(u.t==="multi"){
+    const put=[], gone=[];
+    for(const o of u.ops){ if(o.prev){ const d=Object.assign({},o.prev); syncItem(o.id,d); put.push([o.id,d]); } else if(items.has(o.id)){ gone.push(o.id); } }
+    if(gone.length){ for(const g of gone) selIds.delete(g); const keep=[...selIds]; gone.forEach(dropItem); if(!put.length) { if(keep.length) selectItems(keep); else select(null); } sendOk(Sync.removeItems(gone)); }
+    if(put.length){ sendOk(Sync.commitItems(put)); selectItems(put.map(x=>x[0])); }
+  }
   else if(u.prev){ const d=Object.assign({},u.prev); syncItem(u.id,d); sendOk(Sync.commitItem(u.id,d)); }
   else removeItem(u.id);
   toast("Отменено.");
@@ -1327,14 +1584,18 @@ function renderTools(){
 /* ---------------- people (presence over websocket) ---------------- */
 const peerViews=new Map(); // peer -> {group, tag}
 let lastSent=0;
+let presTimer=0;
 function sendPresence(force){
-  const now=performance.now(); if(!force&&now-lastSent<120) return; lastSent=now;
+  const now=performance.now();
+  if(!force&&now-lastSent<120){ if(!presTimer) presTimer=setTimeout(()=>{ presTimer=0; sendPresence(true); },125-(now-lastSent)); return; }   // the last state of a burst still goes out
+  lastSent=now;
   const pr={mode};
   if(mode==="walk"){ pr.p=walk.pos.toArray().map(r2); pr.yaw=r2(walk.yaw); }
   else { pr.t=orbit.target.toArray().map(r2); }
   pr.sel=selected?(selected.kind==="item"?"item:"+selected.id:"mat:"+keyOf(selected.name)):null;
   const drag=ptr.drag?items.get(ptr.drag.id):(placing&&placing.moveId?items.get(placing.moveId):null);
   pr.drag=drag?{id:ptr.drag?.id||placing.moveId,p:drag.obj.position.toArray().map(r2)}:null;
+  pr.xf=xf?xf.live():null;
   Sync.presence(pr);
 }
 function avatar(color){
@@ -1346,8 +1607,9 @@ function avatar(color){
   ring.rotation.x=-Math.PI/2; ring.position.y=.02; g.add(ring); g.userData.ring=ring; g.userData.body=[body,head,nose];
   return g;
 }
+let liveIds=new Set();       // items currently driven by somebody else's live gesture
 function renderPeers(){
-  const peers=Sync.peers(); const seen=new Set();
+  const peers=Sync.peers(); const seen=new Set(), liveNow=new Set();
   for(const p of peers){
     if(p.sameTab) continue; const pr=p.presence||{}; seen.add(p.peer);
     let v=peerViews.get(p.peer);
@@ -1361,8 +1623,15 @@ function renderPeers(){
     const wp=v.group.position.clone(); wp.y+=walking?1.85:0.4; wp.project(camera);
     const vis=wp.z<1&&Math.abs(wp.x)<1.2&&Math.abs(wp.y)<1.2;
     v.tag.hidden=!vis; if(vis){ v.tag.style.left=((wp.x+1)/2*innerWidth)+"px"; v.tag.style.top=((1-wp.y)/2*innerHeight)+"px"; }
-    if(pr.drag&&typeof pr.drag.id==="string"&&Array.isArray(pr.drag.p)){ const it=items.get(pr.drag.id); if(it&&!(ptr.drag&&ptr.drag.id===pr.drag.id)&&!(placing&&placing.moveId===pr.drag.id)) it.obj.position.set(+pr.drag.p[0]||0,+pr.drag.p[1]||0,+pr.drag.p[2]||0); }
+    if(pr.drag&&typeof pr.drag.id==="string"&&Array.isArray(pr.drag.p)){ const it=items.get(pr.drag.id); if(it&&!localBusy(pr.drag.id)){ it.obj.position.set(+pr.drag.p[0]||0,+pr.drag.p[1]||0,+pr.drag.p[2]||0); liveNow.add(pr.drag.id); } }
+    if(Array.isArray(pr.xf)) for(const e of pr.xf){
+      const it=e&&items.get(e.id); if(!it||localBusy(e.id)||!Array.isArray(e.p)||!Array.isArray(e.r)||!Array.isArray(e.s)) continue;
+      it.obj.position.set(+e.p[0]||0,+e.p[1]||0,+e.p[2]||0); it.obj.rotation.set(+e.r[0]||0,+e.r[1]||0,+e.r[2]||0,"YXZ"); it.obj.scale.set(+e.s[0]||1,+e.s[1]||1,+e.s[2]||1); liveNow.add(e.id);
+    }
   }
+  for(const id of liveIds) if(!liveNow.has(id)){ const it=items.get(id); if(it&&!localBusy(id)) applyObjXf(it.obj,it.doc); }   // the other side cancelled or finished: back to the saved state
+  liveIds=liveNow;
+  if(selIds.size&&hlBoxes.length&&liveNow.size) refreshHl();
   for(const[k,v]of peerViews) if(!seen.has(k)){ scene.remove(v.group); v.tag.remove(); peerViews.delete(k); }
 }
 function renderPeople(){
@@ -1403,6 +1672,7 @@ async function renameMe(){ const n=await askName("Изменить имя",Sync.
 function validPaint(v){ return v&&typeof v.name==="string"&&HEXRE.test(v.color||""); }
 function validItem(v){ return v&&(v.type==="builtin"||v.type==="model"); }
 function validTex(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}\.webp$/.test(v.file)&&typeof v.thumb==="string"&&Array.isArray(v.sizeMm)&&v.sizeMm.length===2; }
+function validFolder(v){ return v&&typeof v.name==="string"&&(v.parent===null||typeof v.parent==="string"); }
 function validModel(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}\.glb$/.test(v.file); }
 function applyState(s){
   Tex.library.clear(); for(const[k,v]of Object.entries(s.textures||{})) if(validTex(v)) Tex.library.set(k,v); libVer++;
@@ -1410,6 +1680,8 @@ function applyState(s){
   paint.clear(); for(const[k,v]of Object.entries(s.paint||{})) if(validPaint(v)) paint.set(k,v);
   parts.clear(); for(const[k,v]of Object.entries(s.parts||{})) if(HEXRE.test(v?.color||"")&&typeof v.key==="string") parts.set(k,v);
   models.clear(); modelCache.clear(); modelReady.clear(); for(const[k,v]of Object.entries(s.models||{})) if(validModel(v)) models.set(k,v);
+  folders.clear(); for(const[k,v]of Object.entries(s.folders||{})) if(validFolder(v)) folders.set(k,v);
+  if(libFolder&&!folders.has(libFolder)) libFolder=null;
   const ids=new Set(Object.keys(s.items||{}));
   for(const id of [...items.keys()]) if(!ids.has(id)) dropItem(id);
   for(const[id,v]of Object.entries(s.items||{})) if(validItem(v)) syncItem(id,v);
@@ -1484,8 +1756,13 @@ function boot(){
   Sync.on("part.reset",m=>{ parts.delete(m.id); applyAllPaint(); renderCtx(true); });
   Sync.on("item.set",m=>{ if(validItem(m.doc)) syncItem(m.id,m.doc); });
   Sync.on("item.delete",m=>dropItem(m.id));
+  Sync.on("items.set",m=>{ for(const e of m.items||[]) if(e&&validItem(e.doc)) syncItem(e.id,e.doc); });
+  Sync.on("items.delete",m=>{ for(const id of m.ids||[]) dropItem(id); });
+  Sync.on("folder.added",m=>{ if(validFolder(m.doc)){ folders.set(m.id,m.doc); renderLib(); } });
+  Sync.on("folder.updated",m=>{ if(validFolder(m.doc)){ folders.set(m.id,m.doc); renderLib(); } });
+  Sync.on("folder.deleted",m=>{ folders.delete(m.id); if(libFolder===m.id) libFolder=null; for(const id of [...libSel]) if(!models.has(id)) libSel.delete(id); renderLib(); });
   Sync.on("model.added",m=>{ if(validModel(m.doc)){ models.set(m.id,m.doc); renderLib(); } });
-  Sync.on("model.updated",m=>{ if(validModel(m.doc)&&models.has(m.id)){ models.set(m.id,m.doc); cards.get("up:"+m.id)?.patch(); pv?.upd(); } });
+  Sync.on("model.updated",m=>{ if(validModel(m.doc)&&models.has(m.id)){ const was=folderOf(models.get(m.id)); models.set(m.id,m.doc); if(folderOf(m.doc)!==was) scheduleLib(); else cards.get("up:"+m.id)?.patch(); pv?.upd(); } });
   Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); modelReady.delete(m.id); renderLib(); pv?.upd(); });
   Sync.on("house.updated",m=>onHouseVersion(m.v,true));
   Sync.on("texture.added",m=>{ if(validTex(m.doc)){ Tex.library.set(m.id,m.doc); libVer++; renderLib(); renderCtx(); renderTools(); } });
@@ -1504,8 +1781,26 @@ window.__villa=()=>({modelReady:modelReady.size>0,preview:pv?{az:pv.controls.get
 /* test hooks (read only): what a mesh wears, and where a world point lands on screen */
 window.__villaTex=()=>({meshes:meshes.map(o=>({box:(b=>[b.min.toArray(),b.max.toArray()])(new THREE.Box3().setFromObject(o)),name:o.name,mat:o.userData.matName,tex:!!(o.material.userData&&o.material.userData.tp),size:o.material.userData?.tp?o.material.userData.tp.tpSize.value.toArray():null,rot:o.material.userData?.tp?o.material.userData.tp.tpRot.value.elements.slice(0,2):null})),
   project:(x,y,z)=>{ const v=new THREE.Vector3(x,y,z).project(camera); const r=renderer.domElement.getBoundingClientRect(); return [r.left+(v.x+1)/2*r.width,r.top+(1-v.y)/2*r.height]; }});
+/* test hooks (read only): the live transform of an item and where a gizmo handle is on screen */
+window.__villaItem=id=>{ const h=items.get(id); if(!h) return null; const o=h.obj; return {doc:h.doc,p:o.position.toArray(),r:[o.rotation.x,o.rotation.y,o.rotation.z],s:o.scale.toArray(),sel:[...selIds],folder:libFolder}; };
+window.__villaCam=()=>({pos:camera.position.toArray(),fov:camera.fov});
+window.__villaGizmo=()=>xf.debug();
+window.__villaSelectItems=ids=>selectItems(ids);
+window.__villaScreen=(x,y,z)=>{ const v=new THREE.Vector3(x,y,z).project(camera); const r=renderer.domElement.getBoundingClientRect(); return [r.left+(v.x+1)/2*r.width,r.top+(1-v.y)/2*r.height]; };
 window.__villaView=(pos,target)=>{ if(mode!=="orbit") return; camera.position.set(...pos); orbit.target.set(...target); orbit.update(); };
 window.__villaSelect=(name,i)=>{ const mesh=meshes.find(o=>o.userData.matName===name&&(i==null||o.name===i)); if(mesh) select({kind:"mat",name,mesh}); return !!mesh; };
+xf=Xform.create({
+  scene,camera,renderer,orbit,items,selIds,el,
+  mode:()=>mode,canWrite:()=>canWrite,tool:()=>tool,placing:()=>placing,pv:()=>pv,house:()=>house,me:()=>myId,
+  setMode,select,selectItems,syncItem,pushUndo,toast,sendOk,rid,updateHint,refreshHl,
+  renderCtx:soft=>renderCtx(soft),sendPresence:force=>sendPresence(force),
+  commitMany:list=>Sync.commitItems(list),removeMany,
+  floorHit:floorHitAt,isVisible,isPass:o=>PASS.has(o.userData.matName),
+  movePlacing:liftPlacing,
+  walkState:()=>({pos:walk.pos.clone(),yaw:walk.yaw,pitch:walk.pitch}),
+  restoreWalk:r=>{ walk.pos.copy(r.pos); walk.yaw=r.yaw; walk.pitch=r.pitch; },
+  switching:v=>{ tabSwitch=v; },switchingNow:()=>tabSwitch,
+});
 boot();
 updateHint(); renderLib(); renderTools();
 })();

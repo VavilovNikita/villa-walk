@@ -84,13 +84,13 @@ function bigGlb(bytes) {
     await editor.setInputFiles("#fileIn", big);
     await editor.waitForSelector("#bigWarn"); await editor.click("#bigWarn >> text=Загрузить");
     const seen = [];
-    for (let i = 0; i < 400 && !(await editor.evaluate(() => document.querySelectorAll("#libList .card").length)); i++) {
+    for (let i = 0; i < 400 && !(await editor.evaluate(() => document.querySelectorAll("#libList .card:not(.fcard)").length)); i++) {
       const t = await editor.evaluate(() => { const b = document.getElementById("houseUp"); return b.hidden ? "" : document.getElementById("houseUpTxt").textContent; });
       if (t) seen.push(t); await sleep(25);
     }
     assert(seen.some(t => /\d+% · [\d.]+ МБ из 80 МБ · [\d.]+ МБ\/с/.test(t)), "progress with % and speed: " + seen.slice(0, 3).join(" | "));
     step("80 MB upload: warning window, progress \"" + seen.filter(t => /%/.test(t)).pop() + "\"");
-    await viewer.waitForSelector("#libList .card", { state: "attached" }).catch(() => {});
+    await viewer.waitForSelector("#libList .card:not(.fcard)", { state: "attached" }).catch(() => {});
     const st = await state(), id = Object.keys(st.models)[0];
     assert.strictEqual(st.models[id].sizeBytes, fs.statSync(big).size);
     const up = path.join(DATA, "uploads");
@@ -101,7 +101,7 @@ function bigGlb(bytes) {
     step("stored unchanged, no .part left, Cache-Control: " + hd.headers.get("cache-control"));
 
     /* thumbnail of the big model: normal render (or a placeholder card, never a crash) */
-    await editor.waitForFunction(() => { const i = document.querySelector("#libList .card img"); return i && /\.thumb\./.test(i.getAttribute("src")); }, null, { timeout: 60000 }).catch(() => step("no thumbnail within 60 s (placeholder card)"));
+    await editor.waitForFunction(() => { const i = document.querySelector("#libList .card:not(.fcard) img"); return i && /\.thumb\./.test(i.getAttribute("src")); }, null, { timeout: 60000 }).catch(() => step("no thumbnail within 60 s (placeholder card)"));
 
     /* 2. placed in the scene -> placeholder, download progress, then the model, in BOTH tabs */
     const doc = { type: "model", model: id, x: 1, y: 0, z: 1, r: 0, s: 1 };

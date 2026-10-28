@@ -75,34 +75,34 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     const ls = await editor.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith("villa.thumb.1.")).length);
     assert.strictEqual(ls, 15);
     assert(await editor.evaluate(() => [...document.querySelectorAll("#libList .thumb img")].every(i => i.src.startsWith("data:image/") && i.loading === "lazy")));
-    assert.strictEqual(await editor.locator("#libList .card").count(), 15);
-    assert.match(await editor.locator("#libList .card").first().locator(".cd").textContent(), /^\d+×\d+×\d+ мм$/);
+    assert.strictEqual(await editor.locator("#libList .card:not(.fcard)").count(), 15);
+    assert.match(await editor.locator("#libList .card:not(.fcard)").first().locator(".cd").textContent(), /^\d+×\d+×\d+ мм$/);
     assert.strictEqual(fs.readdirSync(path.join(DATA, "uploads")).length, 0, "nothing for base furniture on the server");
     step("base tab: 15 cards with lazy <img> thumbnails, cached in localStorage, nothing uploaded");
 
     /* search */
-    await editor.fill("#libSearch", "диван"); assert.strictEqual(await editor.locator("#libList .card").count(), 1);
-    await editor.fill("#libSearch", ""); assert.strictEqual(await editor.locator("#libList .card").count(), 15);
+    await editor.fill("#libSearch", "диван"); assert.strictEqual(await editor.locator("#libList .card:not(.fcard)").count(), 1);
+    await editor.fill("#libSearch", ""); assert.strictEqual(await editor.locator("#libList .card:not(.fcard)").count(), 15);
 
     /* viewer: switch its (hidden) library to the uploaded tab to watch the cards */
     await viewer.evaluate(() => { window.__noReload = 1; });
     await viewer.click("#tUp");
-    await viewer.fill("#libSearch", "zzz"); assert.strictEqual(await viewer.locator("#libList .card").count(), 0); await viewer.fill("#libSearch", "");
+    await viewer.fill("#libSearch", "zzz"); assert.strictEqual(await viewer.locator("#libList .card:not(.fcard)").count(), 0); await viewer.fill("#libSearch", "");
     await editor.click("#tUp");
     assert(await editor.isVisible("#bUpload") && !(await viewer.isVisible("#bUpload")), "only the editor can upload");
 
     /* 1. editor uploads through the UI -> viewer gets the card with a thumbnail, no reload */
     await editor.setInputFiles("#fileIn", glbFile("tablea.glb", 1.2, 0.5, 0.6, [0.8, 0.3, 0.2]));
-    await viewer.waitForSelector("#libList .card");
-    await viewer.waitForFunction(() => { const i = document.querySelector("#libList .card img"); return i && /^\/uploads\/[a-f0-9]{16}\.thumb\.(webp|png)\?t=\d+$/.test(i.getAttribute("src")); }, null, { timeout: 30000 });
+    await viewer.waitForSelector("#libList .card:not(.fcard)");
+    await viewer.waitForFunction(() => { const i = document.querySelector("#libList .card:not(.fcard) img"); return i && /^\/uploads\/[a-f0-9]{16}\.thumb\.(webp|png)\?t=\d+$/.test(i.getAttribute("src")); }, null, { timeout: 30000 });
     assert.strictEqual(await viewer.evaluate(() => window.__noReload), 1, "viewer was not reloaded");
     let st = await state(); const A = Object.keys(st.models)[0];
     assert(st.models[A].thumb && st.models[A].thumbAt && st.models[A].dims.join() === "1200,600,500", "thumb + dims stored: " + JSON.stringify(st.models[A].dims));
-    const src = await viewer.evaluate(() => document.querySelector("#libList .card img").getAttribute("src"));
+    const src = await viewer.evaluate(() => document.querySelector("#libList .card:not(.fcard) img").getAttribute("src"));
     const r = await fetch(BASE + src), body = Buffer.from(await r.arrayBuffer());
     assert.match(r.headers.get("cache-control"), /public, max-age=31536000/);
     assert(body.length < 300 * 1024 && ((body.toString("latin1", 0, 4) === "RIFF" && body.toString("latin1", 8, 12) === "WEBP") || body[1] === 0x50), "valid image");
-    assert.strictEqual(await viewer.locator("#libList .card .cd").first().textContent(), "1200×600×500 мм");
+    assert.strictEqual(await viewer.locator("#libList .card:not(.fcard) .cd").first().textContent(), "1200×600×500 мм");
     step("editor upload: viewer's card got its thumbnail live (" + st.models[A].thumb.split(".").pop() + ", " + body.length + " B, immutable cache)");
 
     /* 2. the viewer cannot send a thumbnail; bad images are refused */
@@ -122,7 +122,7 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     step("viewer / wrong key -> 403; fake image, 400 KB, wrong type, unknown model all refused");
 
     /* viewer: preview window works (rotation, size) but offers no editing actions */
-    await viewer.locator("#libList .card .card-i").click();
+    await viewer.locator("#libList .card:not(.fcard) .card-i").click();
     await viewer.waitForFunction(() => window.__villa().preview?.loaded, null, { timeout: 20000 });
     assert.match(await viewer.locator("#pv .meta.mono").first().textContent(), /1200×600×500 мм/);
     assert.strictEqual(await viewer.locator("#pv .pv-actions button").count(), 0, "no action buttons for the viewer");
@@ -130,7 +130,7 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     await viewer.mouse.move(vb.x + vb.width / 2, vb.y + vb.height / 2); await viewer.mouse.down(); await viewer.mouse.move(vb.x + vb.width / 2 + 120, vb.y + vb.height / 2, { steps: 8 }); await viewer.mouse.up();
     assert(Math.abs((await viewer.evaluate(() => window.__villa().preview)).az - vz) > 0.3, "viewer can rotate");
     await viewer.keyboard.press("Escape"); await viewer.waitForSelector("#pv", { state: "detached" });
-    await viewer.locator("#libList .card-main").first().click(); // clicking a card opens the preview, never places
+    await viewer.locator("#libList .card:not(.fcard) .card-main").first().click(); // clicking a card opens the preview, never places
     await viewer.waitForSelector("#pv"); assert.strictEqual((await viewer.evaluate(() => window.__villa().items)), 0); await viewer.keyboard.press("Escape");
     const nk = { method: "PATCH", headers: { "content-type": "application/json" }, body: '{"name":"x"}' };
     assert.strictEqual((await fetch(`${BASE}/api/models/${A}`, nk)).status, 403);
@@ -147,16 +147,16 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     await editor.waitForFunction(() => window.__villa().cards.length >= 15); await sleep(1500);
     assert.strictEqual((await state()).models[B].thumb, null, "not generated while the tab is closed");
     await editor.click("#tUp");
-    await viewer.waitForFunction(id => { const c = [...document.querySelectorAll("#libList .card")]; return c.length === 2 && c.every(x => x.querySelector("img")); }, B, { timeout: 30000 });
+    await viewer.waitForFunction(id => { const c = [...document.querySelectorAll("#libList .card:not(.fcard)")]; return c.length === 2 && c.every(x => x.querySelector("img")); }, B, { timeout: 30000 });
     st = await state(); assert(st.models[B].thumb && st.models[B].dims.join() === "400,300,1800", JSON.stringify(st.models[B]));
     step("old model without a thumbnail got one when the editor opened the tab; viewer updated live");
 
     /* sorting */
     await editor.selectOption("#libSort", "name");
-    assert.deepStrictEqual(await editor.locator("#libList .cn").allTextContents(), ["Полка", "tablea"].sort((a, b) => a.localeCompare(b, "ru")));
+    assert.deepStrictEqual(await editor.locator("#libList .card:not(.fcard) .cn").allTextContents(), ["Полка", "tablea"].sort((a, b) => a.localeCompare(b, "ru")));
 
     /* 4. hover spin */
-    const card = editor.locator("#libList .card").first();
+    const card = editor.locator("#libList .card:not(.fcard)").first();
     await card.hover(); await editor.waitForSelector("#libList .thumb canvas.spin", { timeout: 20000 });
     assert.strictEqual(await editor.locator("canvas.spin").count(), 1);
     await editor.mouse.move(5, 5); await editor.waitForSelector("canvas.spin", { state: "detached" });
@@ -164,7 +164,7 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
 
     /* 5. preview window */
     await editor.selectOption("#libSort", "new");
-    const cardA = editor.locator("#libList .card", { hasText: "tablea" });
+    const cardA = editor.locator("#libList .card:not(.fcard)", { hasText: "tablea" });
     await cardA.locator(".card-i").click();
     await editor.waitForFunction(() => window.__villa().preview?.loaded, null, { timeout: 20000 });
     const box = await editor.locator("#pv .pv-cv").boundingBox();
@@ -182,7 +182,7 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     assert((await state()).models[A].thumbAt > t0, "thumbnail re-rendered");
     await editor.click("#pv >> text=Переименовать"); await editor.fill("#pv .pv-name", "Стол А"); await editor.keyboard.press("Enter");
     await editor.waitForFunction(() => document.getElementById("pvTitle").textContent === "Стол А");
-    await viewer.waitForFunction(() => [...document.querySelectorAll("#libList .cn")].some(n => n.textContent === "Стол А"));
+    await viewer.waitForFunction(() => [...document.querySelectorAll("#libList .card:not(.fcard) .cn")].some(n => n.textContent === "Стол А"));
     step("refresh thumbnail + rename work, viewer saw the new name");
 
     /* delete with in-window confirmation, only this model's files go */
@@ -193,12 +193,12 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     assert.strictEqual((await state()).models[A].name, "Стол А", "nothing deleted before confirming");
     await editor.click("#pv >> text=Да, удалить");
     await editor.waitForSelector("#pv", { state: "detached" });
-    await viewer.waitForFunction(() => document.querySelectorAll("#libList .card").length === 1);
+    await viewer.waitForFunction(() => document.querySelectorAll("#libList .card:not(.fcard)").length === 1);
     assert(!files().some(f => f.startsWith(A)) && files().some(f => f.startsWith(B + ".thumb.")) && files().includes(B + ".glb"), "only model A's files removed: " + files());
     step("delete confirmed in the window; model + its thumbnail gone, the other model's files kept");
 
     /* "Поставить в сцену" from the window */
-    await editor.locator("#libList .card .card-i").click(); await editor.waitForFunction(() => window.__villa().preview?.loaded, null, { timeout: 20000 });
+    await editor.locator("#libList .card:not(.fcard) .card-i").click(); await editor.waitForFunction(() => window.__villa().preview?.loaded, null, { timeout: 20000 });
     await editor.click("#pv >> text=Поставить в сцену"); await editor.waitForSelector("#pv", { state: "detached" });
     await editor.keyboard.press("Escape");
 

@@ -201,6 +201,51 @@ button.primary-danger{background:var(--danger);color:#fff;border-color:var(--dan
 #viewBadge{right:max(12px,env(safe-area-inset-right,0px));bottom:calc(12px + env(safe-area-inset-bottom,0px));padding:5px 10px;font-size:12px;color:var(--muted);opacity:.85}
 .chip.me{cursor:pointer}
 
+
+/* transforms: item panel, operation bar, box selection, cheat sheet */
+.xf{display:flex;flex-direction:column;gap:8px}
+.xf-row{display:flex;flex-direction:column;gap:3px}
+.xf-in{display:flex;gap:4px;align-items:flex-end}
+.xf-f{display:flex;flex-direction:column;gap:1px;flex:1;min-width:0;font-size:10.5px;color:var(--muted)}
+.xf-f input{width:100%;height:28px;padding:0 4px;border:1px solid var(--line);border-radius:6px;background:var(--panel-solid);box-sizing:border-box;font:12px var(--f-mono);min-width:0}
+.xf-lock{min-height:28px;padding:0 6px;flex:none}
+.xf-btns button{font-size:12px;padding:4px 8px;min-height:28px}
+.xf-giz{display:flex;flex-direction:column;gap:6px}
+.xf-giz .seg button{flex:1;font-size:11.5px;padding:4px 3px}
+.xf-chk{display:flex;gap:6px;align-items:center;font-size:12px;color:var(--muted)}
+#opBar{left:50%;transform:translateX(-50%);bottom:calc(12px + env(safe-area-inset-bottom,0px));padding:8px 12px;display:flex;flex-direction:column;gap:2px;align-items:center;max-width:calc(100vw - 24px);text-align:center;z-index:7}
+#opBar b{font-size:15px}
+#opTag{position:fixed;z-index:9;pointer-events:none;background:#1d2622;color:#fff;padding:2px 7px;border-radius:6px;font-size:12px;white-space:nowrap}
+#boxSel{position:fixed;z-index:8;border:1px dashed var(--accent);background:var(--accent-soft);pointer-events:none}
+.kh{width:min(600px,100%)}
+.kh-row{display:flex;gap:10px;align-items:baseline;font-size:13px}
+.kh-row kbd{flex:0 0 190px;font-family:var(--f-mono);font-size:11px;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:1px 5px}
+.kh-h{font-weight:600;margin-top:6px}
+
+/* model folders */
+.crumbs{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.crumb-nav{display:flex;flex-wrap:wrap;gap:2px;align-items:center;flex:1;min-width:0}
+.crumb{padding:2px 6px;min-height:26px;font-size:12.5px}
+.crumb.cur{font-weight:600}
+.crumb-nav .sep{color:var(--muted)}
+.crumb-back{padding:2px 8px;min-height:26px;font-size:12.5px}
+#bNewFolder{padding:2px 8px;min-height:26px;font-size:12.5px}
+.drop{outline:2px solid var(--accent);outline-offset:1px;background:var(--accent-soft)}
+.fcard .fthumb{display:grid;place-items:center;color:var(--accent);aspect-ratio:1.6}
+.fcard .cd{color:var(--muted)}
+.card.sel .card-main{outline:2px solid var(--accent);outline-offset:1px}
+.card .cp{font-size:10.5px;color:var(--accent);padding:0 2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;display:block}
+.f-rename{width:100%;height:24px;padding:0 4px;border:1px solid var(--accent);border-radius:5px;background:var(--panel-solid);box-sizing:border-box;font:inherit;font-weight:500}
+.selbar{grid-column:1/-1;display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:12.5px}
+.drag-ghost{position:fixed;z-index:60;pointer-events:none;padding:4px 10px;border-radius:8px;background:var(--accent);color:var(--accent-ink);font-size:12.5px;box-shadow:var(--shadow);max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+body.dragging{cursor:grabbing;user-select:none;-webkit-user-select:none}
+.fmenu{position:fixed;z-index:40;display:flex;flex-direction:column;padding:4px;min-width:170px}
+.fmenu button{text-align:left;border:0}
+.fp-list{display:flex;flex-direction:column;max-height:50vh;overflow:auto;gap:2px}
+.fp-row{text-align:left;border:0;background:transparent;padding:6px 10px}
+.fp-row:disabled{opacity:.4;cursor:not-allowed}
+.pv-folder{overflow-wrap:anywhere}
+
 @media (max-width:720px){
   #tools{bottom:calc(52px + env(safe-area-inset-bottom,0px))}
   #tools .bar button .nm{display:none}
@@ -277,11 +322,13 @@ button.primary-danger{background:var(--danger);color:#fff;border-color:var(--dan
 <script src="/vendor/three.min.js"></script>
 <script src="/vendor/GLTFLoader.js"></script>
 <script src="/vendor/OrbitControls.js"></script>
+<script src="/vendor/TransformControls.js"></script>
 <script src="/thumbs.js"></script>
 <script src="/tex.js"></script>
 <script src="/texdlg.js"></script>
 <script src="/sync.js"></script>
 <script src="/picker.js"></script>
+<script src="/xform.js"></script>
 <script src="/app.js"></script>
 </body>
 </html>

@@ -74,6 +74,9 @@ S.resetPart=id=>send({t:"part.reset",id});
 S.setSwatches=colors=>send({t:"swatches.set",colors});
 S.commitItem=(id,doc)=>send({t:"item.set",id,doc});
 S.removeItem=id=>send({t:"item.delete",id});
+/* a group is sent in chunks of 40 (one websocket frame is limited); false if any chunk could not be sent */
+S.commitItems=list=>{ let ok=true; for(let i=0;i<list.length;i+=40) ok=send({t:"items.set",items:list.slice(i,i+40).map(([id,doc])=>({id,doc}))})&&ok; return ok; };
+S.removeItems=ids=>{ let ok=true; for(let i=0;i<ids.length;i+=100) ok=send({t:"items.delete",ids:ids.slice(i,i+100)})&&ok; return ok; };
 
 async function api(method,url,body,extra){
   const r=await fetch(url,{method,body,headers:Object.assign({"x-edit-key":key,"x-uid":profile.uid},extra)});
@@ -89,9 +92,13 @@ const xhrPost=(url,fd,onProgress)=>new Promise((res,rej)=>{
   x.onerror=()=>{ const e=new Error("network"); e.code="network"; rej(e); };
   x.send(fd);
 });
-S.upload=(file,name,onProgress)=>{ const fd=new FormData(); fd.append("name",name); fd.append("file",file,file.name); return xhrPost("/api/models",fd,onProgress); };
+S.upload=(file,name,onProgress,folder)=>{ const fd=new FormData(); fd.append("name",name); if(folder) fd.append("folder",folder); fd.append("file",file,file.name); return xhrPost("/api/models",fd,onProgress); };
 S.uploadThumb=(id,blob,mm)=>api("POST","/api/models/"+encodeURIComponent(id)+"/thumb?w="+mm[0]+"&d="+mm[1]+"&h="+mm[2],blob,{"content-type":blob.type});
 S.renameModel=(id,name)=>api("PATCH","/api/models/"+encodeURIComponent(id),JSON.stringify({name}),{"content-type":"application/json"});
+S.moveModels=(ids,folder)=>api("POST","/api/models/move",JSON.stringify({ids,folder}),{"content-type":"application/json"});
+S.addFolder=(name,parent)=>api("POST","/api/folders",JSON.stringify({name,parent:parent||null}),{"content-type":"application/json"});
+S.patchFolder=(id,patch)=>api("PATCH","/api/folders/"+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});
+S.removeFolder=(id,mode)=>api("DELETE","/api/folders/"+encodeURIComponent(id)+"?mode="+(mode==="models"?"models":"move"));
 S.removeModel=id=>api("DELETE","/api/models/"+encodeURIComponent(id));
 S.uploadTexture=fd=>api("POST","/api/textures",fd);
 S.patchTexture=(id,patch)=>api("PATCH","/api/textures/"+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});

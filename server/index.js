@@ -47,20 +47,34 @@ let textures = null; // set once the app exists (server/textures.js)
 const texDoc = v => textures.texDoc(v);
 
 const ID = /^[a-z0-9]{6,20}$/;
+const POS_LIM = 200, SCALE_MIN = 0.01, SCALE_MAX = 100;
 function itemDoc(d, by) {
   if (!isObj(d)) bad();
   const out = {};
   if (d.type === "builtin") { if (!BUILTIN.has(d.key)) bad(); out.type = "builtin"; out.key = d.key; }
   else if (d.type === "model") { if (typeof d.model !== "string" || !ID.test(d.model) || !getDoc("models", d.model)) bad(); out.type = "model"; out.model = d.model; }
   else bad();
-  for (const k of ["x", "y", "z"]) { if (!num(d[k])) bad(); out[k] = d[k]; }
-  out.r = d.r == null ? 0 : (num(d.r, 1000) ? d.r : bad());
-  out.s = d.s == null ? 1 : (num(d.s, 100) && d.s > 0.01 ? d.s : bad());
+  for (const k of ["x", "y", "z"]) { if (!num(d[k], POS_LIM)) bad(); out[k] = d[k]; }
+  /* rotation (rad, three.js frame: y is up) and scale per axis; the pre-transform fields r (= ry) and s (uniform) are still accepted */
+  const rot = (v, dflt) => v == null ? dflt : (num(v, 1000) ? v : bad());
+  /* a negative scale is a mirror image; its size must still be within 0.01..100 */
+  const scl = (v, dflt) => v == null ? dflt : (num(v, SCALE_MAX) && Math.abs(v) >= SCALE_MIN ? v : bad());
+  out.rx = rot(d.rx, 0); out.ry = rot(d.ry, rot(d.r, 0)); out.rz = rot(d.rz, 0);
+  const s0 = scl(d.s, 1);
+  out.sx = scl(d.sx, s0); out.sy = scl(d.sy, s0); out.sz = scl(d.sz, s0);
+  /* kept for older clients and a rollback: r is the yaw, s the height scale */
+  out.r = out.ry; out.s = Math.abs(out.sy);
   if (d.color != null) { if (typeof d.color !== "string" || !HEX.test(d.color)) bad(); out.color = d.color; }
   const f = fin(d.finish); if (f === undefined) bad(); out.finish = f;
   const tex = texDoc(d.tex); if (tex) out.tex = tex;
   out.by = by; out.at = Date.now();
   return out;
+}
+/* items saved before the transforms existed have r (yaw) and s (uniform scale) only: read them as the new fields, the stored row is left alone */
+function itemOut(d) {
+  const s = d.s == null ? 1 : d.s;
+  return { ...d, rx: d.rx == null ? 0 : d.rx, ry: d.ry == null ? (d.r || 0) : d.ry, rz: d.rz == null ? 0 : d.rz,
+    sx: d.sx == null ? s : d.sx, sy: d.sy == null ? s : d.sy, sz: d.sz == null ? s : d.sz };
 }
 function paintDoc(d, by) {
   if (!isObj(d) || typeof d.color !== "string" || !HEX.test(d.color)) bad();
@@ -89,6 +103,21 @@ const MUT = {
     if (!getDoc("items", m.id) && q.count.get("items").n >= MAX_ITEMS) bad();
     const doc = itemDoc(m.doc, p.uid); putDoc("items", m.id, doc); return { t: "item.set", id: m.id, doc };
   },
+  /* a group moved / scaled / deleted in one gesture: all or nothing, one broadcast (the ws frame limit allows about 40 items) */
+  "items.set": (m, p) => {
+    if (!Array.isArray(m.items) || !m.items.length || m.items.length > 40) bad();
+    const ids = m.items.map(e => isObj(e) && e.id); if (!ids.every(i => idOk(i, ID)) || new Set(ids).size !== ids.length) bad();
+    const fresh = ids.filter(i => !getDoc("items", i)).length;
+    if (fresh && q.count.get("items").n + fresh > MAX_ITEMS) bad();
+    const docs = m.items.map(e => [e.id, itemDoc(e.doc, p.uid)]);
+    for (const [id, doc] of docs) putDoc("items", id, doc);
+    return { t: "items.set", items: docs.map(([id, doc]) => ({ id, doc })) };
+  },
+  "items.delete": m => {
+    if (!Array.isArray(m.ids) || !m.ids.length || m.ids.length > 100 || !m.ids.every(i => idOk(i, ID))) bad();
+    for (const i of m.ids) q.del.run("items", i);
+    return { t: "items.delete", ids: m.ids };
+  },
   "item.delete": m => { if (!idOk(m.id, ID)) bad(); q.del.run("items", m.id); return { t: "item.delete", id: m.id }; },
   "swatches.set": (m, p) => {
     if (!Array.isArray(m.colors) || m.colors.length > 40 || !m.colors.every(c => typeof c === "string" && HEX.test(c))) bad();
@@ -115,9 +144,9 @@ app.register(require("@fastify/static"), { root: MODELS, prefix: "/models/", dec
 app.register(require("@fastify/multipart"), { limits: { fileSize: MAX_MODEL_BYTES, files: 1, fields: 4, fieldSize: 1024 } });
 
 /* models saved before thumbnails existed have no thumb fields: expose them as null without touching the stored rows */
-const modelOut = d => ({ thumb: null, thumbAt: null, ...d });
+const modelOut = d => ({ thumb: null, thumbAt: null, folder: null, ...d });
 const models = () => Object.fromEntries(Object.entries(collection("models")).map(([id, d]) => [id, modelOut(d)]));
-const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: collection("items"), models: models(), textures: textures.list(), swatches: getDoc("swatches", "project") || { colors: [] } });
+const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: Object.fromEntries(Object.entries(collection("items")).map(([id, d]) => [id, itemOut(d)])), models: models(), folders: folders.all(), textures: textures.list(), swatches: getDoc("swatches", "project") || { colors: [] } });
 app.get("/api/state", async (req, reply) => { reply.header("Cache-Control", "no-store"); return snapshot(); });
 app.get("/api/health", async () => ({ ok: true, peers: peers.size }));
 
@@ -176,7 +205,8 @@ app.post("/api/models", async (req, reply) => {
     const f = part.fields.name;
     const name = clean(f && f.value) || clean(String(part.filename || "").replace(/\.glb$/i, "")) || "Модель";
     const by = clean(req.headers["x-uid"], 32).replace(/[^A-Za-z0-9]/g, "") || "editor";
-    const doc = { name, file, sizeBytes: size, by, at: Date.now(), thumb: null, thumbAt: null };
+    const ff = part.fields.folder, folder = ff && typeof ff.value === "string" && folders.exists(ff.value) ? ff.value : null;
+    const doc = { name, file, sizeBytes: size, by, at: Date.now(), thumb: null, thumbAt: null, folder };
     putDoc("models", id, doc);
     broadcast({ t: "model.added", id, doc });
     return { id, doc };
@@ -228,9 +258,14 @@ app.patch("/api/models/:id", async (req, reply) => {
   if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
   const { id } = req.params; const doc = idOk(id, ID) && getDoc("models", id);
   if (!doc) return reply.code(404).send({ error: "not_found" });
-  const name = clean(req.body && req.body.name);
-  if (!name) return reply.code(400).send({ error: "invalid" });
-  const next = { ...doc, name }; putDoc("models", id, next);
+  const b = isObj(req.body) ? req.body : {}, next = { ...doc };
+  if (b.name !== undefined) { const name = clean(b.name); if (!name) return reply.code(400).send({ error: "invalid" }); next.name = name; }
+  if (b.folder !== undefined) {
+    if (b.folder !== null && !(typeof b.folder === "string" && folders.exists(b.folder))) return reply.code(404).send({ error: "not_found" });
+    next.folder = b.folder;
+  }
+  if (b.name === undefined && b.folder === undefined) return reply.code(400).send({ error: "invalid" });
+  putDoc("models", id, next);
   broadcast({ t: "model.updated", id, doc: modelOut(next) });
   return { ok: true, doc: modelOut(next) };
 });
@@ -239,12 +274,20 @@ app.delete("/api/models/:id", async (req, reply) => {
   if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
   const { id } = req.params; const doc = idOk(id, ID) && getDoc("models", id);
   if (!doc) return reply.code(404).send({ error: "not_found" });
+  deleteModel(id, doc);
+  return { ok: true };
+});
+function deleteModel(id, doc) {
   for (const [iid, it] of Object.entries(collection("items"))) if (it.model === id) { q.del.run("items", iid); broadcast({ t: "item.delete", id: iid }); }
   q.del.run("models", id);
   fs.rmSync(path.join(UPLOADS, path.basename(doc.file)), { force: true });
   rmThumbs(id);
   broadcast({ t: "model.deleted", id });
-  return { ok: true };
+}
+
+/* ---- folders of the model library ---- */
+const folders = require("./folders").createFolders({
+  app, getDoc, putDoc, del: (c, id) => q.del.run(c, id), collection, broadcast: m => broadcast(m), keyOk, idOk, ID, clean, isObj, modelOut, deleteModel,
 });
 
 /* ---- texture library ---- */
@@ -270,6 +313,12 @@ function cleanPresence(d, canEdit) {
   if (num(d.yaw, 1000)) o.yaw = d.yaw;
   o.sel = typeof d.sel === "string" ? d.sel.slice(0, 80) : null;
   o.drag = canEdit && isObj(d.drag) && idOk(d.drag.id, ID) && vec3(d.drag.p) ? { id: d.drag.id, p: d.drag.p } : null;
+  /* live transform of one or several items: [{id, p, r:[rx,ry,rz], s:[sx,sy,sz]}]; nothing is stored, the final state comes as item.set */
+  o.xf = null;
+  if (canEdit && Array.isArray(d.xf) && d.xf.length <= 60) {
+    const list = d.xf.filter(e => isObj(e) && idOk(e.id, ID) && vec3(e.p) && vec3(e.r) && vec3(e.s)).map(e => ({ id: e.id, p: e.p, r: e.r, s: e.s }));
+    if (list.length) o.xf = list;
+  }
   return o;
 }
 
