@@ -7,3 +7,6 @@ node_modules/
 data-dev/
 EDIT_LINK.local.txt
 test-results/
+.env.train
+EDIT_LINK.train.txt
+data-train/

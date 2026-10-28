@@ -6,7 +6,7 @@ const fs = require("fs");
 const crypto = require("crypto");
 const sharp = require("sharp");
 
-const MAX_BYTES = 15 * 1024 * 1024, MAX_TEXTURES = 300, MAX_PIXELS = 120e6;
+const MAX_TEXTURES = 300, MAX_PIXELS = 120e6;
 const FULL_PX = 2048, MID_PX = 1024, THUMB_PX = 256, MIN_CROP_PX = 16;
 const MM_MIN = 5, MM_MAX = 20000;
 
@@ -29,7 +29,7 @@ const mmPair = (w, h) => {
   return [Math.round(a), Math.round(b)];
 };
 
-function createTextures({ app, UPLOADS, getDoc, putDoc, del, collection, count, broadcast, keyOk, idOk, ID, clean, isObj, num, HEX }) {
+function createTextures({ app, UPLOADS, getDoc, putDoc, del, collection, count, broadcast, keyOk, idOk, ID, clean, isObj, num, HEX, maxBytes: MAX_BYTES = 15 * 1024 * 1024 }) {
   const DIR = path.join(UPLOADS, "textures");   // created with the first upload: an install without textures leaves uploads/ as it was
   sharp.cache(false);
 

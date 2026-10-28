@@ -146,7 +146,7 @@ T.exists = s => !!s && (s.id ? T.library.has(s.id) : !!DEFS[s.builtin]);
 T.nameOf = s => s ? (s.id ? (T.library.get(s.id)?.name || "Текстура") : (DEFS[s.builtin]?.name || "Текстура")) : "";
 T.defaultSize = s => s ? (s.id ? (T.library.get(s.id)?.sizeMm || [600, 600]) : (DEFS[s.builtin]?.sizeMm || [600, 600])) : [600, 600];
 T.sizeOf = tex => (tex && Array.isArray(tex.sizeMm) ? tex.sizeMm : T.defaultSize(tex));
-T.thumbUrl = s => s && s.id ? (T.library.get(s.id)?.thumb ? "/uploads/textures/" + T.library.get(s.id).thumb : null) : null;
+T.thumbUrl = s => s && s.id ? (T.library.get(s.id)?.thumb ? Env.url("/uploads/textures/") + T.library.get(s.id).thumb : null) : null;
 const dataThumbs = new Map();
 /* a small tile of a procedural texture (2x2 repeats) for cards */
 T.builtinThumb = key => {
@@ -166,7 +166,7 @@ function makeTexture(s) {
   let t;
   if (s.id) {
     const d = T.library.get(s.id);
-    t = new THREE.TextureLoader().load("/uploads/textures/" + ((small ? d?.file1024 : d?.file) || d?.file || "missing.webp"));
+    t = new THREE.TextureLoader().load(Env.url("/uploads/textures/") + ((small ? d?.file1024 : d?.file) || d?.file || "missing.webp"));
   } else t = new THREE.CanvasTexture(drawBuiltin(s.builtin, small ? 512 : 1024));
   t.wrapS = t.wrapT = THREE.RepeatWrapping; t.encoding = THREE.sRGBEncoding;
   t.anisotropy = aniso; t.generateMipmaps = true; t.minFilter = THREE.LinearMipmapLinearFilter; t.magFilter = THREE.LinearFilter;

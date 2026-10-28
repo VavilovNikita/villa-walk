@@ -3,7 +3,7 @@
    Exposes window.TexDlg.open() -> Promise<{id, doc} | null>. */
 (() => {
 "use strict";
-const MAX_SIDE = 2048, MAX_FILE = 15 * 1024 * 1024;
+const MAX_SIDE = 2048, MAX_FILE = Env.maxTextureMb * 1024 * 1024;
 const $e = (tag, attrs = {}, ...kids) => { const e = document.createElement(tag); for (const [k, v] of Object.entries(attrs)) { if (v == null) continue; if (k === "on") for (const [ev, fn] of Object.entries(v)) e.addEventListener(ev, fn); else if (k === "text") e.textContent = v; else e.setAttribute(k, v); } e.append(...kids.filter(Boolean)); return e; };
 const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
 const mkCanvas = (w, h) => { const c = document.createElement("canvas"); c.width = Math.max(1, Math.round(w)); c.height = Math.max(1, Math.round(h)); return c; };
@@ -77,11 +77,11 @@ function open() {
       file.onchange = () => take(file.files[0]); cam.onchange = () => take(cam.files[0]);
       body.append($e("div", { class: "meta", text: "Снимайте прямо, при ровном свете, без бликов. Измерьте рулеткой, сколько мм по ширине попало в рамку." }),
         $e("div", { class: "row" }, $e("button", { class: "primary", text: "Выбрать файл", on: { click: () => file.click() } }), $e("button", { text: "Снять на камеру", on: { click: () => cam.click() } }), file, cam),
-        $e("div", { class: "meta", text: "JPG, PNG, WebP или HEIC, до 15 МБ." }));
+        $e("div", { class: "meta", text: "JPG, PNG, WebP или HEIC, до " + Env.maxTextureMb + " МБ." }));
     }
     async function take(f) {
       if (!f) return;
-      if (f.size > MAX_FILE) { say("Файл больше 15 МБ.", true); return; }
+      if (f.size > MAX_FILE) { say("Файл больше " + Env.maxTextureMb + " МБ.", true); return; }
       say("Открываю фото…");
       try {
         const bmp = await createImageBitmap(f, { imageOrientation: "from-image" });
@@ -195,7 +195,7 @@ function open() {
     }
 
     /* ---------- save ---------- */
-    const ERR = { forbidden: "Загружать текстуры может только редактор.", too_large: "Файл больше 15 МБ.", too_many_textures: "Слишком много текстур. Удалите ненужные.", bad_image: "Сервер не смог прочитать это изображение.", bad_size: "Проверьте размер фрагмента в мм (от 5 до 20000).", network: "Нет связи с сервером." };
+    const ERR = { forbidden: "Загружать текстуры может только редактор.", too_large: "Файл больше " + Env.maxTextureMb + " МБ.", too_many_textures: "Слишком много текстур. Удалите ненужные.", bad_image: "Сервер не смог прочитать это изображение.", bad_size: "Проверьте размер фрагмента в мм (от 5 до 20000).", network: "Нет связи с сервером." };
     async function save() {
       if (st.busy) return; st.busy = true; saveBtn.disabled = true; say("Загружаю…");
       try {

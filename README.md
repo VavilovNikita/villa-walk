@@ -137,3 +137,37 @@
 ## Протокол
 `GET /api/state`; `GET /api/house`; `POST /api/house`, `POST /api/house/restore {name}`, `POST /api/house/reload` (multipart / JSON, заголовок `x-edit-key`); `POST /api/models` (multipart, заголовок `x-edit-key`); `PATCH|DELETE /api/models/:id`; `POST /api/models/move`; `POST|PATCH|DELETE /api/folders[/:id]`; `POST /api/textures` (multipart), `PATCH|DELETE /api/textures/:id` (тоже с ключом редактора); WebSocket `/ws`:
 `hello`, `presence`, `paint.set|reset`, `part.set|reset`, `item.set|delete`, `items.set|delete` (пачка), `swatches.set` → сервер рассылает всем, включая отправителя; `model.added|updated|deleted`, `folder.added|updated|deleted`, `texture.added|updated|removed` и `house.updated {v, at}` рассылаются после загрузки/удаления/замены по HTTP.
+
+## Тренировочная среда
+
+Полностью изолированная копия на том же сервере: **https://villa.sunsetsamui.com/train/**. Своя база и загрузки (`/srv/villa-walk/data-train`), свой ключ редактора, свой WebSocket (`/train/ws`). Ничего общего с основной средой, кроме файла модели дома, который читается оттуда один раз (только чтение).
+
+- **Ссылка редактора** лежит в файле `EDIT_LINK.train.txt` в каталоге проекта на VPS (права 600), ключ — в `.env.train`. Файлы не печатать и не коммитить.
+- **Как устроено:** `BASE_PATH=/train` монтирует всё (статику, `/api`, `/ws`, `/models`, `/uploads`, `/api/health`) под префиксом; клиент берёт префикс из `<meta name="base-path">`, ключи localStorage получают префикс `train:`. Пустой `BASE_PATH` — основная среда, как раньше. `SANDBOX=1` включает плашку, заголовок «Тренировка — …», сброс и лимиты (модели до 50 МБ, текстуры до 10 МБ).
+- **Сбросить вручную:** редактор, в оранжевой плашке сверху «Сбросить всё». Очищает цвета, детали, текстуры на поверхностях и мебель; с галочкой «и библиотеку тоже» — ещё модели, текстуры и папки. Модель дома остаётся. Все участники получают перезагрузку сцены.
+- **Автосброс:** `SANDBOX_RESET_CRON` в `docker-compose.yml` (по умолчанию выключен), cron из 5 полей в часовом поясе контейнера (`TZ=Asia/Bangkok`). Каждую ночь в 04:00: `SANDBOX_RESET_CRON: "0 4 * * *"`. `SANDBOX_RESET_LIBRARY=1` — сбрасывать и библиотеку.
+- **Обновить модель дома:** кнопка «Взять модель дома из основной» в плашке (только редактор). Копирует `villa.glb` из основной среды (каталог `/srv/villa-walk/data/models` примонтирован в контейнер только для чтения, `SANDBOX_SEED_HOUSE=/main-models/villa.glb`), предыдущая версия попадает в историю. При первом запуске копия делается сама.
+- **Бэкап:** песочница не бэкапится, `deploy/backup.sh` её не трогает.
+- **Тест:** `node tests/sandbox.e2e.js` поднимает обе среды за одним origin (как nginx) и проверяет раздельность данных, ключей, WebSocket, сброс.
+
+## Выкатка (тренировочная среда)
+
+На VPS, в каталоге проекта:
+
+```sh
+git pull
+sh deploy/init-train.sh            # один раз: .env.train (600) с новым ключом, EDIT_LINK.train.txt, /srv/villa-walk/data-train
+docker compose up -d --build       # пересоберёт образ, поднимет villa-walk-train на 127.0.0.1:3101; основной сервис не меняется по настройкам
+```
+
+`init-train.sh` нужно запустить **до** `docker compose up`: без `.env.train` compose не стартует. Каталог данных должен принадлежать 1000:1000 (скрипт делает chown, если хватает прав).
+
+nginx: в `server { listen 443 ... }` добавить блоки `location = /train`, `location /train/ws` и `location /train/` из `deploy/nginx-villa-walk.conf` **перед** `location / {`, затем:
+
+```sh
+sudo cp deploy/nginx-villa-walk.conf /etc/nginx/sites-available/villa-walk   # или внести блоки вручную
+sudo nginx -t && sudo nginx -s reload
+curl -s https://villa.sunsetsamui.com/train/api/health     # {"ok":true,...,"sandbox":true}
+```
+
+Ссылку редактора взять из `EDIT_LINK.train.txt` (`cat` только на самом сервере).

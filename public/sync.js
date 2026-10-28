@@ -1,7 +1,7 @@
 /* Sync layer: WebSocket + REST client for the villa server. Exposes window.Sync. */
 (() => {
 "use strict";
-const LS = { get(k){ try{ return localStorage.getItem(k); }catch{ return null; } }, set(k,v){ try{ localStorage.setItem(k,v); }catch{} } };
+const LS = { get(k){ try{ return localStorage.getItem(Env.ls(k)); }catch{ return null; } }, set(k,v){ try{ localStorage.setItem(Env.ls(k),v); }catch{} } };
 const HEX=/^#[0-9a-f]{6}$/i;
 const COLORS=["#2f6f62","#c4625a","#5d5aa8","#c28a5a","#4a8fb8","#8a6aa8","#6a9a3a","#d0803a","#b05a8a","#3a8a8a"];
 
@@ -32,13 +32,13 @@ const S={ profile, canEdit:false, peerId:null, online:false, on, peerMap:new Map
 function send(m){ if(ws&&ws.readyState===1&&S.online){ ws.send(JSON.stringify(m)); return true; } return false; }
 
 async function loadState(){
-  try{ const r=await fetch("/api/state",{cache:"no-store"}); if(!r.ok) throw new Error("http "+r.status); emit("state",await r.json()); }
+  try{ const r=await fetch(Env.url("/api/state"),{cache:"no-store"}); if(!r.ok) throw new Error("http "+r.status); emit("state",await r.json()); }
   catch(e){ console.warn("state",e); }
 }
 
 function open(){
   clearTimeout(timer);
-  ws=new WebSocket((location.protocol==="https:"?"wss://":"ws://")+location.host+"/ws");
+  ws=new WebSocket(Env.wsUrl());
   ws.onopen=()=>ws.send(JSON.stringify({t:"hello",name:profile.name,color:profile.color,uid:profile.uid,key:key||undefined}));
   ws.onmessage=ev=>{
     let m; try{ m=JSON.parse(ev.data); }catch{ return; }
@@ -92,21 +92,25 @@ const xhrPost=(url,fd,onProgress)=>new Promise((res,rej)=>{
   x.onerror=()=>{ const e=new Error("network"); e.code="network"; rej(e); };
   x.send(fd);
 });
-S.upload=(file,name,onProgress,folder)=>{ const fd=new FormData(); fd.append("name",name); if(folder) fd.append("folder",folder); fd.append("file",file,file.name); return xhrPost("/api/models",fd,onProgress); };
-S.uploadThumb=(id,blob,mm)=>api("POST","/api/models/"+encodeURIComponent(id)+"/thumb?w="+mm[0]+"&d="+mm[1]+"&h="+mm[2],blob,{"content-type":blob.type});
-S.renameModel=(id,name)=>api("PATCH","/api/models/"+encodeURIComponent(id),JSON.stringify({name}),{"content-type":"application/json"});
-S.moveModels=(ids,folder)=>api("POST","/api/models/move",JSON.stringify({ids,folder}),{"content-type":"application/json"});
-S.addFolder=(name,parent)=>api("POST","/api/folders",JSON.stringify({name,parent:parent||null}),{"content-type":"application/json"});
-S.patchFolder=(id,patch)=>api("PATCH","/api/folders/"+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});
-S.removeFolder=(id,mode)=>api("DELETE","/api/folders/"+encodeURIComponent(id)+"?mode="+(mode==="models"?"models":"move"));
-S.removeModel=id=>api("DELETE","/api/models/"+encodeURIComponent(id));
-S.uploadTexture=fd=>api("POST","/api/textures",fd);
-S.patchTexture=(id,patch)=>api("PATCH","/api/textures/"+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});
-S.removeTexture=id=>api("DELETE","/api/textures/"+encodeURIComponent(id));
+S.upload=(file,name,onProgress,folder)=>{ const fd=new FormData(); fd.append("name",name); if(folder) fd.append("folder",folder); fd.append("file",file,file.name); return xhrPost(Env.url("/api/models"),fd,onProgress); };
+S.uploadThumb=(id,blob,mm)=>api("POST",Env.url("/api/models/")+encodeURIComponent(id)+"/thumb?w="+mm[0]+"&d="+mm[1]+"&h="+mm[2],blob,{"content-type":blob.type});
+S.renameModel=(id,name)=>api("PATCH",Env.url("/api/models/")+encodeURIComponent(id),JSON.stringify({name}),{"content-type":"application/json"});
+S.moveModels=(ids,folder)=>api("POST",Env.url("/api/models/move"),JSON.stringify({ids,folder}),{"content-type":"application/json"});
+S.addFolder=(name,parent)=>api("POST",Env.url("/api/folders"),JSON.stringify({name,parent:parent||null}),{"content-type":"application/json"});
+S.patchFolder=(id,patch)=>api("PATCH",Env.url("/api/folders/")+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});
+S.removeFolder=(id,mode)=>api("DELETE",Env.url("/api/folders/")+encodeURIComponent(id)+"?mode="+(mode==="models"?"models":"move"));
+S.removeModel=id=>api("DELETE",Env.url("/api/models/")+encodeURIComponent(id));
+S.uploadTexture=fd=>api("POST",Env.url("/api/textures"),fd);
+S.patchTexture=(id,patch)=>api("PATCH",Env.url("/api/textures/")+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});
+S.removeTexture=id=>api("DELETE",Env.url("/api/textures/")+encodeURIComponent(id));
 
-S.houseInfo=async()=>{ const r=await fetch("/api/house",{cache:"no-store",headers:{"x-edit-key":key}}); if(!r.ok) throw new Error("http "+r.status); return r.json(); };
-S.restoreHouse=name=>api("POST","/api/house/restore",JSON.stringify({name}),{"content-type":"application/json"});
-S.uploadHouse=(file,onProgress)=>{ const fd=new FormData(); fd.append("file",file,file.name); return xhrPost("/api/house",fd,onProgress); };
+S.houseInfo=async()=>{ const r=await fetch(Env.url("/api/house"),{cache:"no-store",headers:{"x-edit-key":key}}); if(!r.ok) throw new Error("http "+r.status); return r.json(); };
+S.restoreHouse=name=>api("POST",Env.url("/api/house/restore"),JSON.stringify({name}),{"content-type":"application/json"});
+S.uploadHouse=(file,onProgress)=>{ const fd=new FormData(); fd.append("file",file,file.name); return xhrPost(Env.url("/api/house"),fd,onProgress); };
+
+/* training environment only */
+S.resetSandbox=library=>api("POST",Env.url("/api/sandbox/reset"),JSON.stringify({library:!!library}),{"content-type":"application/json"});
+S.pullHouse=()=>api("POST",Env.url("/api/sandbox/pull-house"),"{}",{"content-type":"application/json"});
 
 window.Sync=S;
 })();

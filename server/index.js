@@ -8,9 +8,19 @@ try { process.loadEnvFile(path.join(__dirname, "..", ".env")); } catch {}
 const PORT = +process.env.PORT || 3000;
 const EDIT_KEY = process.env.EDIT_KEY || "";
 const DATA_DIR = path.resolve(process.env.DATA_DIR || path.join(__dirname, "..", "data"));
+/* BASE_PATH: everything (static files, /api, /ws, /models, /uploads) lives under this prefix, e.g. "/train"; empty = the root */
+const BASE = (() => {
+  const b = String(process.env.BASE_PATH || "").trim();
+  if (!b || b === "/") return "";
+  if (!/^\/[A-Za-z0-9._~-]+(\/[A-Za-z0-9._~-]+)*\/?$/.test(b)) { console.error("BASE_PATH must look like /train"); process.exit(1); }
+  return b.replace(/\/$/, "");
+})();
+/* SANDBOX: the training environment - its own data, smaller upload limits, "reset everything", a house model copied from the main environment */
+const SANDBOX = /^(1|true|yes)$/i.test(process.env.SANDBOX || "");
+const SEED_HOUSE = SANDBOX ? (process.env.SANDBOX_SEED_HOUSE || "") : "";
 if (EDIT_KEY.length < 16) { console.error("EDIT_KEY is missing or too short (set it in .env)"); process.exit(1); }
 
-const MAX_PEERS = 40, MAX_MODEL_BYTES = 200 * 1024 * 1024, MAX_ITEMS = 3000, MAX_MODELS = 300, MAX_THUMB_BYTES = 300 * 1024, MAX_THUMB_PX = 1024;
+const MAX_PEERS = 40, MAX_MODEL_BYTES = (SANDBOX ? 50 : 200) * 1024 * 1024, MAX_TEX_BYTES = (SANDBOX ? 10 : 15) * 1024 * 1024, MAX_ITEMS = 3000, MAX_MODELS = 300, MAX_THUMB_BYTES = 300 * 1024, MAX_THUMB_PX = 1024;
 const UPLOADS = path.join(DATA_DIR, "uploads"), MODELS = path.join(DATA_DIR, "models");
 fs.mkdirSync(UPLOADS, { recursive: true }); fs.mkdirSync(MODELS, { recursive: true });
 
@@ -30,7 +40,7 @@ const putDoc = (c, id, d) => q.put.run(c, id, JSON.stringify(d));
 const collection = c => Object.fromEntries(q.all.all(c).map(r => [r.id, JSON.parse(r.data)]));
 
 const house = require("./house").createHouse({
-  modelsDir: MODELS, seedFile: path.join(__dirname, "..", "seed", "villa.glb"), getDoc, putDoc, broadcast: m => broadcast(m),
+  modelsDir: MODELS, seedFile: SEED_HOUSE && fs.existsSync(SEED_HOUSE) ? SEED_HOUSE : path.join(__dirname, "..", "seed", "villa.glb"), getDoc, putDoc, broadcast: m => broadcast(m),
 });
 
 /* ---------------- validation ---------------- */
@@ -126,19 +136,35 @@ const MUT = {
 };
 
 /* ---------------- http ---------------- */
-const app = require("fastify")({ logger: { level: "warn" }, trustProxy: true, bodyLimit: 64 * 1024 });
+const root = require("fastify")({ logger: { level: "warn" }, trustProxy: true, bodyLimit: 64 * 1024 });
 const sha = s => crypto.createHash("sha256").update(String(s)).digest();
 const keyOk = k => typeof k === "string" && k.length < 200 && crypto.timingSafeEqual(sha(k), sha(EDIT_KEY));
 
+/* all routes are registered inside one plugin that carries the BASE_PATH prefix (the body is not re-indented on purpose: the plugin ends before the websocket section) */
+root.register(async function routes(app) {
 app.addHook("onSend", async (req, reply) => {
   reply.header("X-Content-Type-Options", "nosniff");
   reply.header("Referrer-Policy", "same-origin");
-  if (req.url.startsWith("/models/")) reply.header("Cache-Control", "no-cache");
+  if (req.url.startsWith(BASE + "/models/")) reply.header("Cache-Control", "no-cache");
   if ((reply.getHeader("content-type") || "").startsWith("text/html"))
     reply.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss: data: blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'");
 });
 
-app.register(require("@fastify/static"), { root: path.join(__dirname, "..", "public"), maxAge: 0 });
+/* index.html is rendered per request: absolute paths get the prefix, <meta> tells the client where it lives and which environment it is */
+const INDEX_FILE = path.join(__dirname, "..", "public", "index.html");
+function renderIndex() {
+  let h = fs.readFileSync(INDEX_FILE, "utf8");
+  h = h.replace(/(\s(?:src|href)=")\/(?!\/)/g, "$1" + BASE + "/");
+  const meta = `<meta name="base-path" content="${BASE}">` + (SANDBOX ? `<meta name="sandbox" content="1">` : "") +
+    `<meta name="max-model-mb" content="${MAX_MODEL_BYTES / 1048576}"><meta name="max-texture-mb" content="${MAX_TEX_BYTES / 1048576}">`;
+  h = h.replace(/(<meta charset="utf-8">)/, "$1\n" + meta);
+  if (SANDBOX) h = h.replace(/<title>[^<]*<\/title>/, "<title>Тренировка — Вилла Sunset Beach</title>");
+  return h;
+}
+const sendIndex = async (req, reply) => reply.header("Content-Type", "text/html; charset=utf-8").header("Cache-Control", "no-cache").send(renderIndex());
+app.get("/", { prefixTrailingSlash: "slash" }, sendIndex);
+app.get("/index.html", sendIndex);
+app.register(require("@fastify/static"), { root: path.join(__dirname, "..", "public"), maxAge: 0, index: false });
 app.register(require("@fastify/static"), { root: UPLOADS, prefix: "/uploads/", decorateReply: false, maxAge: "365d", immutable: true, index: false, dotfiles: "deny" });
 app.register(require("@fastify/static"), { root: MODELS, prefix: "/models/", decorateReply: false, cacheControl: false, index: false, dotfiles: "deny" });
 app.register(require("@fastify/multipart"), { limits: { fileSize: MAX_MODEL_BYTES, files: 1, fields: 4, fieldSize: 1024 } });
@@ -148,7 +174,7 @@ const modelOut = d => ({ thumb: null, thumbAt: null, folder: null, ...d });
 const models = () => Object.fromEntries(Object.entries(collection("models")).map(([id, d]) => [id, modelOut(d)]));
 const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: Object.fromEntries(Object.entries(collection("items")).map(([id, d]) => [id, itemOut(d)])), models: models(), folders: folders.all(), textures: textures.list(), swatches: getDoc("swatches", "project") || { colors: [] } });
 app.get("/api/state", async (req, reply) => { reply.header("Cache-Control", "no-store"); return snapshot(); });
-app.get("/api/health", async () => ({ ok: true, peers: peers.size }));
+app.get("/api/health", async () => ({ ok: true, peers: peers.size, sandbox: SANDBOX }));
 
 /* ---- house model (villa.glb) ---- */
 const forbidden = (req, reply) => { if (keyOk(req.headers["x-edit-key"])) return false; reply.code(403).send({ error: "forbidden" }); return true; };
@@ -293,8 +319,72 @@ const folders = require("./folders").createFolders({
 /* ---- texture library ---- */
 textures = require("./textures").createTextures({
   app, UPLOADS, getDoc, putDoc, del: (c, id) => q.del.run(c, id), collection, count: c => q.count.get(c).n, broadcast: m => broadcast(m),
-  keyOk, idOk, ID, clean, isObj, num, HEX,
+  keyOk, idOk, ID, clean, isObj, num, HEX, maxBytes: MAX_TEX_BYTES,
 });
+
+/* ---- training environment only: these routes do not exist elsewhere (404) ---- */
+if (SANDBOX) {
+  app.post("/api/sandbox/reset", async (req, reply) => {
+    if (forbidden(req, reply)) return;
+    resetSandbox(!!(isObj(req.body) && req.body.library === true));
+    return { ok: true };
+  });
+  /* only reads the main environment's file (SANDBOX_SEED_HOUSE, mounted read-only) */
+  app.post("/api/sandbox/pull-house", async (req, reply) => {
+    if (forbidden(req, reply)) return;
+    if (!SEED_HOUSE || !fs.existsSync(SEED_HOUSE)) return reply.code(404).send({ error: "no_source" });
+    const tmp = house.tmpName();
+    try {
+      fs.copyFileSync(SEED_HOUSE, tmp);
+      if (!house.validate(tmp)) { fs.rmSync(tmp, { force: true }); return reply.code(400).send({ error: "not_glb" }); }
+      const m = house.install(tmp);
+      return { ok: true, v: m.v, at: m.at };
+    } catch (e) { fs.rmSync(tmp, { force: true }); req.log.warn(e); return reply.code(500).send({ error: "copy_failed" }); }
+  });
+}
+}, { prefix: BASE });
+if (BASE) root.get(BASE, (req, reply) => reply.redirect(BASE + "/" + (req.url.includes("?") ? req.url.slice(req.url.indexOf("?")) : ""), 301));
+
+/* ---------------- training environment: reset and schedule ---------------- */
+function resetSandbox(library) {
+  db.transaction(() => {
+    for (const c of ["paint", "parts", "items", "swatches"]) db.prepare("DELETE FROM docs WHERE coll=?").run(c);
+    if (library) for (const c of ["models", "folders", "textures"]) db.prepare("DELETE FROM docs WHERE coll=?").run(c);
+  })();
+  if (library) for (const n of fs.readdirSync(UPLOADS)) fs.rmSync(path.join(UPLOADS, n), { recursive: true, force: true });
+  broadcast({ t: "sandbox.reset", library });
+}
+/* five-field cron (minute hour day-of-month month day-of-week; *, lists, ranges, steps) in the container's time zone */
+function cronMatcher(expr) {
+  const f = String(expr).trim().split(/\s+/);
+  if (f.length !== 5) throw new Error("SANDBOX_RESET_CRON needs 5 fields");
+  const lims = [[0, 59], [0, 23], [1, 31], [1, 12], [0, 7]];
+  const sets = f.map((part, i) => {
+    const [lo, hi] = lims[i], set = new Set();
+    for (const item of part.split(",")) {
+      const m = /^(\*|\d+(?:-\d+)?)(?:\/(\d+))?$/.exec(item); if (!m) throw new Error("bad cron field " + part);
+      let a = lo, b = hi;
+      if (m[1] !== "*") { const r = m[1].split("-").map(Number); a = r[0]; b = r.length > 1 ? r[1] : (m[2] ? hi : r[0]); }
+      const step = m[2] ? +m[2] : 1;
+      if (!step || a < lo || b > hi || a > b) throw new Error("bad cron field " + part);
+      for (let v = a; v <= b; v += step) set.add(v);
+    }
+    return set;
+  });
+  if (sets[4].has(7)) sets[4].add(0);
+  return d => sets[0].has(d.getMinutes()) && sets[1].has(d.getHours()) && sets[2].has(d.getDate()) && sets[3].has(d.getMonth() + 1) && sets[4].has(d.getDay());
+}
+if (SANDBOX && process.env.SANDBOX_RESET_CRON) {
+  let due; try { due = cronMatcher(process.env.SANDBOX_RESET_CRON); } catch (e) { console.error(e.message); process.exit(1); }
+  const withLibrary = /^(1|true|yes)$/i.test(process.env.SANDBOX_RESET_LIBRARY || "");
+  let lastMinute = -1;
+  setInterval(() => {
+    const now = new Date(), minute = Math.floor(now.getTime() / 60000);
+    if (minute === lastMinute || !due(now)) return;
+    lastMinute = minute;
+    try { resetSandbox(withLibrary); console.log("sandbox reset on schedule" + (withLibrary ? " (library too)" : "")); } catch (e) { console.error("sandbox reset failed", e); }
+  }, 15000).unref();
+}
 
 /* ---------------- websocket ---------------- */
 const { WebSocketServer } = require("ws");
@@ -352,7 +442,7 @@ wss.on("connection", (ws, req) => {
     }
     const fn = MUT[m.t]; if (!fn) return;
     if (!peer.canEdit) return send(ws, { t: "error", code: "forbidden", ref: m.t });
-    try { broadcast(fn(m, peer)); } catch (e) { if (e.message !== "invalid") app.log.error(e); send(ws, { t: "error", code: "invalid", ref: m.t }); }
+    try { broadcast(fn(m, peer)); } catch (e) { if (e.message !== "invalid") root.log.error(e); send(ws, { t: "error", code: "invalid", ref: m.t }); }
   });
   ws.on("close", () => { clearTimeout(helloTimer); peers.delete(peer.id); sendPeers(); });
   ws.on("error", () => ws.terminate());
@@ -362,16 +452,16 @@ setInterval(() => {
   for (const p of peers.values()) { if (!p.alive) { p.ws.terminate(); continue; } p.alive = false; try { p.ws.ping(); } catch {} }
 }, 25000).unref();
 
-app.server.on("upgrade", (req, socket, head) => {
+root.server.on("upgrade", (req, socket, head) => {
   const reject = c => { socket.write(`HTTP/1.1 ${c}\r\nConnection: close\r\n\r\n`); socket.destroy(); };
   let url; try { url = new URL(req.url, "http://x"); } catch { return reject("400 Bad Request"); }
-  if (url.pathname !== "/ws") return reject("404 Not Found");
+  if (url.pathname !== BASE + "/ws") return reject("404 Not Found");
   const origin = req.headers.origin;
   if (origin) { let ok = false; try { ok = new URL(origin).host === req.headers.host; } catch {} if (!ok) return reject("403 Forbidden"); }
   if (peers.size >= MAX_PEERS) return reject("503 Service Unavailable");
   wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
 });
 
-app.listen({ port: PORT, host: process.env.HOST || "0.0.0.0" }).then(() => console.log("villa-walk listening on " + PORT)).catch(e => { console.error(e); process.exit(1); });
-const stop = () => { wss.clients.forEach(c => c.close(1001)); app.close().finally(() => { db.close(); process.exit(0); }); };
+root.listen({ port: PORT, host: process.env.HOST || "0.0.0.0" }).then(() => console.log("villa-walk listening on " + PORT)).catch(e => { console.error(e); process.exit(1); });
+const stop = () => { wss.clients.forEach(c => c.close(1001)); root.close().finally(() => { db.close(); process.exit(0); }); };
 process.on("SIGTERM", stop); process.on("SIGINT", stop);

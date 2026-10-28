@@ -47,8 +47,8 @@ const FINISHES=[[null,"Как есть"],["matte","Матовая"],["satin","С
 
 /* shared state */
 const P={ FINISHES, project:[], canEdit:false, onProject:null, instances:new Set() };
-let recent=[]; try{ recent=JSON.parse(localStorage.getItem("villa.recent")||"[]").filter(c=>HEX.test(c)).slice(0,16); }catch{}
-P.addRecent=hex=>{ hex=hex.toLowerCase(); recent=[hex,...recent.filter(c=>c!==hex)].slice(0,16); try{ localStorage.setItem("villa.recent",JSON.stringify(recent)); }catch{} P.refresh(); };
+let recent=[]; try{ recent=JSON.parse(localStorage.getItem(Env.ls("villa.recent"))||"[]").filter(c=>HEX.test(c)).slice(0,16); }catch{}
+P.addRecent=hex=>{ hex=hex.toLowerCase(); recent=[hex,...recent.filter(c=>c!==hex)].slice(0,16); try{ localStorage.setItem(Env.ls("villa.recent"),JSON.stringify(recent)); }catch{} P.refresh(); };
 P.setProject=(colors,canEdit)=>{ P.project=colors.filter(c=>HEX.test(c)).slice(0,40); if(canEdit!==undefined) P.canEdit=canEdit; P.refresh(); };
 P.refresh=()=>{ for(const i of [...P.instances]){ if(!i.el.isConnected){ P.instances.delete(i); continue; } i.renderLists(); } };
 

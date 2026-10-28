@@ -41,7 +41,7 @@ function create(api) {
   const ptr = { x: innerWidth / 2, y: innerHeight / 2 }, ndc = new T.Vector2(), mods = { shift: false, ctrl: false };
   const ray = new T.Raycaster();
   let gizMode = "translate", gizSpace = "world";
-  try { const g = localStorage.getItem("villa.gizmo"); if (["off", "translate", "rotate", "scale"].includes(g)) gizMode = g; const sp = localStorage.getItem("villa.gizspace"); if (sp === "local") gizSpace = "local"; } catch {}
+  try { const g = localStorage.getItem(Env.ls("villa.gizmo")); if (["off", "translate", "rotate", "scale"].includes(g)) gizMode = g; const sp = localStorage.getItem(Env.ls("villa.gizspace")); if (sp === "local") gizSpace = "local"; } catch {}
 
   /* ---------------- helpers ---------------- */
   function setNdc(x, y) { const r = dom.getBoundingClientRect(); ndc.set(((x - r.left) / r.width) * 2 - 1, -((y - r.top) / r.height) * 2 + 1); return ndc; }
@@ -352,8 +352,8 @@ function create(api) {
     orbit.enabled = false; return true;
   }
   const setGizmo = (m, sp) => {
-    if (m) { gizMode = m; try { localStorage.setItem("villa.gizmo", m); } catch {} }
-    if (sp) { gizSpace = sp; try { localStorage.setItem("villa.gizspace", sp); } catch {} }
+    if (m) { gizMode = m; try { localStorage.setItem(Env.ls("villa.gizmo"), m); } catch {} }
+    if (sp) { gizSpace = sp; try { localStorage.setItem(Env.ls("villa.gizspace"), sp); } catch {} }
     updateGizmo(); api.renderCtx();
   };
 

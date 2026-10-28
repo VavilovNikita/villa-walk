@@ -13,3 +13,26 @@ services:
       - "127.0.0.1:3100:3000"
     volumes:
       - /srv/villa-walk/data:/data
+
+  # Training environment (https://<domain>/train/): same image, its own data, key, port and WebSocket. Setup: sh deploy/init-train.sh
+  villa-walk-train:
+    build: .
+    image: villa-walk:latest
+    container_name: villa-walk-train
+    restart: unless-stopped
+    user: "1000:1000"
+    env_file: .env.train
+    environment:
+      PORT: "3000"
+      DATA_DIR: /data
+      BASE_PATH: /train
+      SANDBOX: "1"
+      SANDBOX_SEED_HOUSE: /main-models/villa.glb
+      # SANDBOX_RESET_CRON: "0 4 * * *"   # reset the scene every night at 04:00 (container time zone)
+      TZ: Asia/Bangkok
+    ports:
+      - "127.0.0.1:3101:3000"
+    volumes:
+      - /srv/villa-walk/data-train:/data
+      # the main environment's models directory, read only: the source of the house model (a directory, not the file - the file is replaced by rename)
+      - /srv/villa-walk/data/models:/main-models:ro
