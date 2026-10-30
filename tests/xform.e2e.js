@@ -362,7 +362,7 @@ function wsEditor() {
     assert.match(await editor.locator('#libList .fcard[data-folder="' + bath + '"] .cd').textContent(), /0 моделей/);
     await editor.click('#libList .fcard[data-folder="' + bath + '"] .card-main');
     assert.strictEqual((await editor.locator(".crumb-nav").textContent()).replace(/\s+/g, ""), "Всемодели›Санузел");
-    await editor.setInputFiles("#fileIn", glbFile("sink.glb", 0.6, 0.2, 0.5, [0.2, 0.5, 0.9]));
+    await editor.setInputFiles("#upFiles", glbFile("sink.glb", 0.6, 0.2, 0.5, [0.2, 0.5, 0.9]));
     await editor.waitForSelector("#libList .card:not(.fcard)", { timeout: 30000 });
     st = await state(); const sinkId = Object.keys(st.models).find(k => st.models[k].name === "sink"); assert.strictEqual(st.models[sinkId].folder, bath, "uploaded into the open folder");
     assert.match(await editor.locator('#libList .fcard[data-folder="' + sinks.j.id + '"] .cd').textContent(), /0 моделей/);

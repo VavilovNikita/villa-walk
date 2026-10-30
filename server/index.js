@@ -149,7 +149,7 @@ app.addHook("onSend", async (req, reply) => {
   reply.header("Referrer-Policy", "same-origin");
   if (req.url.startsWith(BASE + "/models/")) reply.header("Cache-Control", "no-cache");
   if ((reply.getHeader("content-type") || "").startsWith("text/html"))
-    reply.header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss: data: blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'");
+    reply.header("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; img-src 'self' data: blob:; connect-src 'self' ws: wss: data: blob:; object-src 'none'; base-uri 'self'; frame-ancestors 'self'");
 });
 
 /* index.html is rendered per request: absolute paths get the prefix, <meta> tells the client where it lives and which environment it is */
@@ -173,8 +173,14 @@ app.register(require("@fastify/multipart"), { limits: { fileSize: MAX_MODEL_BYTE
 
 /* models saved before thumbnails existed have no thumb fields: expose them as null without touching the stored rows */
 const modelOut = d => ({ thumb: null, thumbAt: null, folder: null, ...d });
+/* light copies of the models (server/compress.js); COMPRESS=off switches the whole feature off */
+const compress = require("./compress").createCompressor({
+  UPLOADS, getDoc, putDoc, collection, broadcast: m => broadcast(m), modelOut, enabled: !/^(0|off|false|no)$/i.test(process.env.COMPRESS || "on"),
+});
+/* models stored before compression existed (or whose compression never ran) are packed one by one, a few seconds after start-up */
+app.addHook("onReady", async () => { setTimeout(() => compress.backfill(), process.env.COMPRESS_START_DELAY_MS != null ? +process.env.COMPRESS_START_DELAY_MS : 4000).unref(); });
 const models = () => Object.fromEntries(Object.entries(collection("models")).map(([id, d]) => [id, modelOut(d)]));
-const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: Object.fromEntries(Object.entries(collection("items")).map(([id, d]) => [id, itemOut(d)])), models: models(), folders: folders.all(), textures: textures.list(), swatches: getDoc("swatches", "project") || { colors: [] } });
+const snapshot = () => ({ house: house.meta, paint: collection("paint"), parts: collection("parts"), items: Object.fromEntries(Object.entries(collection("items")).map(([id, d]) => [id, itemOut(d)])), models: models(), compress: compress.status(), folders: folders.all(), textures: textures.list(), swatches: getDoc("swatches", "project") || { colors: [] } });
 app.get("/api/state", async (req, reply) => { reply.header("Cache-Control", "no-store"); return snapshot(); });
 app.get("/api/health", async () => ({ ok: true, peers: peers.size, sandbox: SANDBOX }));
 
@@ -195,8 +201,18 @@ app.post("/api/house", async (req, reply) => {
     await pipeline(part.file, fs.createWriteStream(tmp));
     if (part.file.truncated) { fs.rmSync(tmp, { force: true }); return reply.code(413).send({ error: "too_large" }); }
     if (!house.validate(tmp)) { fs.rmSync(tmp, { force: true }); return reply.code(400).send({ error: "not_glb" }); }
-    const m = house.install(tmp);
-    return { ok: true, v: m.v, at: m.at };
+    /* lossless only (unused data dropped, meshopt): no mesh simplification, no renames - the paint documents hang on mesh and material names. The upload is kept as villa.orig.glb. */
+    let lite = null;
+    if (compress.enabled) {
+      const out = house.tmpName();
+      try {
+        await compress.runWorker(tmp, out, "house");
+        if (house.validate(out) && fs.statSync(out).size < fs.statSync(tmp).size) lite = out; else fs.rmSync(out, { force: true });
+      } catch (e) { fs.rmSync(out, { force: true }); console.warn("house compression failed, the original is used: " + (e && e.message)); }
+    }
+    const sizeOrig = fs.statSync(tmp).size, sizeLite = lite ? fs.statSync(lite).size : sizeOrig;
+    const m = lite ? house.install(lite, tmp) : house.install(tmp);
+    return { ok: true, v: m.v, at: m.at, sizeOrig, sizeLite, compressed: !!lite };
   } catch (e) {
     fs.rmSync(tmp, { force: true });
     req.log.warn(e);
@@ -242,20 +258,24 @@ function storeModel(tmp, { name, folder, by, replaceId, dup, thumbBy }) {
     if (hit) { if (dup === "skip") { fs.rmSync(tmp, { force: true }); return { skipped: true, id: hit[0] }; } replaceId = hit[0]; old = hit[1]; }
   }
   if (!old && q.count.get("models").n >= MAX_MODELS) return refuse("too_many_models");
-  const id = old ? replaceId : crypto.randomBytes(8).toString("hex"), file = crypto.randomBytes(8).toString("hex") + ".glb";
+  const id = old ? replaceId : crypto.randomBytes(8).toString("hex"), file = crypto.randomBytes(8).toString("hex") + ".orig.glb";
   fs.renameSync(tmp, path.join(UPLOADS, file));
+  const orig = { origFile: file, sizeOrig: size };   // `file` is what participants download: the upload itself until the light copy is ready
   const pend = thumbBy ? { thumbBy: by, thumbPendingAt: Date.now() } : {};
   if (old) {   // the id stays; the new file gets a new name (files are served immutable), the old file and thumbnail go
     const { dims, thumbBy: _a, thumbPendingAt: _b, ...rest } = old;
-    const doc = { ...rest, file, sizeBytes: size, thumb: null, thumbAt: null, ...pend };
+    for (const k of ["liteFile", "sizeLite", "trisOrig", "trisLite", "compressedAt", "compressError", "useOrig"]) delete rest[k];
+    const doc = { ...rest, file, ...orig, sizeBytes: size, thumb: null, thumbAt: null, ...pend };
     putDoc("models", id, doc);
-    fs.rmSync(path.join(UPLOADS, path.basename(old.file)), { force: true }); rmThumbs(id);
+    for (const f of compress.filesOf(old)) fs.rmSync(path.join(UPLOADS, path.basename(f)), { force: true }); rmThumbs(id);
     broadcast({ t: "model.updated", id, doc: modelOut(doc) });
+    compress.enqueue(id);
     return { id, doc: modelOut(doc), replaced: true };
   }
-  const doc = { name, file, sizeBytes: size, by, at: Date.now(), thumb: null, thumbAt: null, folder: folder && folders.exists(folder) ? folder : null, ...pend };
+  const doc = { name, file, ...orig, sizeBytes: size, by, at: Date.now(), thumb: null, thumbAt: null, folder: folder && folders.exists(folder) ? folder : null, ...pend };
   putDoc("models", id, doc);
   broadcast({ t: "model.added", id, doc });
+  compress.enqueue(id);
   return { id, doc };
 }
 const STORE_STATUS = { not_glb: 400, not_found: 404, too_many_models: 409 };
@@ -369,10 +389,27 @@ app.patch("/api/models/:id", async (req, reply) => {
     if (b.folder !== null && !(typeof b.folder === "string" && folders.exists(b.folder))) return reply.code(404).send({ error: "not_found" });
     next.folder = b.folder;
   }
-  if (b.name === undefined && b.folder === undefined) return reply.code(400).send({ error: "invalid" });
+  /* which copy the participants download: the original instead of the compressed one (in case compression spoiled the model) */
+  if (b.useOrig !== undefined) {
+    if (typeof b.useOrig !== "boolean") return reply.code(400).send({ error: "invalid" });
+    if (!doc.liteFile) return reply.code(409).send({ error: "not_compressed" });
+    next.useOrig = b.useOrig; next.file = b.useOrig ? doc.origFile : doc.liteFile;
+  }
+  if (b.name === undefined && b.folder === undefined && b.useOrig === undefined) return reply.code(400).send({ error: "invalid" });
   putDoc("models", id, next);
   broadcast({ t: "model.updated", id, doc: modelOut(next) });
   return { ok: true, doc: modelOut(next) };
+});
+
+/* compress again from the original (also after an error) */
+app.post("/api/models/:id/recompress", async (req, reply) => {
+  if (!keyOk(req.headers["x-edit-key"])) return reply.code(403).send({ error: "forbidden" });
+  const { id } = req.params; const doc = idOk(id, ID) && getDoc("models", id);
+  if (!doc) return reply.code(404).send({ error: "not_found" });
+  if (!compress.enabled) return reply.code(409).send({ error: "compression_off" });
+  if (doc.compressError) { const next = { ...doc }; delete next.compressError; putDoc("models", id, next); broadcast({ t: "model.updated", id, doc: modelOut(next) }); }
+  compress.enqueue(id, { force: true });
+  return reply.code(202).send({ ok: true });
 });
 
 app.delete("/api/models/:id", async (req, reply) => {
@@ -385,7 +422,7 @@ app.delete("/api/models/:id", async (req, reply) => {
 function deleteModel(id, doc) {
   for (const [iid, it] of Object.entries(collection("items"))) if (it.model === id) { q.del.run("items", iid); broadcast({ t: "item.delete", id: iid }); }
   q.del.run("models", id);
-  fs.rmSync(path.join(UPLOADS, path.basename(doc.file)), { force: true });
+  for (const f of compress.filesOf(doc)) fs.rmSync(path.join(UPLOADS, path.basename(f)), { force: true });
   rmThumbs(id);
   broadcast({ t: "model.deleted", id });
 }

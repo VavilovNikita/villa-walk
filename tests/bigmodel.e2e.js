@@ -76,12 +76,12 @@ function bigGlb(bytes) {
 
     /* 1. 80 MB through the UI: warning window first (Cancel does nothing), then progress with % and speed */
     const big = path.join(DATA, "big80.glb"); fs.writeFileSync(big, bigGlb(80 * 1048576));
-    await editor.setInputFiles("#fileIn", big);
+    await editor.setInputFiles("#upFiles", big);
     await editor.waitForSelector("#bigWarn");
     assert.match(await editor.locator("#bigWarn").textContent(), /Модель большая — у участников со слабым интернетом и на телефонах она будет грузиться долго/);
     await editor.click("#bigWarn >> text=Отмена"); await editor.waitForSelector("#bigWarn", { state: "detached" });
     assert.strictEqual(Object.keys((await state()).models).length, 0, "cancel uploads nothing");
-    await editor.setInputFiles("#fileIn", big);
+    await editor.setInputFiles("#upFiles", big);
     await editor.waitForSelector("#bigWarn"); await editor.click("#bigWarn >> text=Загрузить");
     const seen = [];
     for (let i = 0; i < 400 && !(await editor.evaluate(() => document.querySelectorAll("#libList .card:not(.fcard)").length)); i++) {

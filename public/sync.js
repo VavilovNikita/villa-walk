@@ -105,6 +105,8 @@ S.job=id=>api("GET",Env.url("/api/jobs/")+encodeURIComponent(id));
 S.ensureFolders=(parent,path)=>api("POST",Env.url("/api/folders/ensure"),JSON.stringify({parent:parent||null,path}),{"content-type":"application/json"});
 S.uploadThumb=(id,blob,mm)=>api("POST",Env.url("/api/models/")+encodeURIComponent(id)+"/thumb?w="+mm[0]+"&d="+mm[1]+"&h="+mm[2],blob,{"content-type":blob.type});
 S.renameModel=(id,name)=>api("PATCH",Env.url("/api/models/")+encodeURIComponent(id),JSON.stringify({name}),{"content-type":"application/json"});
+S.patchModel=(id,patch)=>api("PATCH",Env.url("/api/models/")+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});
+S.recompress=id=>api("POST",Env.url("/api/models/")+encodeURIComponent(id)+"/recompress","{}",{"content-type":"application/json"});
 S.moveModels=(ids,folder)=>api("POST",Env.url("/api/models/move"),JSON.stringify({ids,folder}),{"content-type":"application/json"});
 S.addFolder=(name,parent)=>api("POST",Env.url("/api/folders"),JSON.stringify({name,parent:parent||null}),{"content-type":"application/json"});
 S.patchFolder=(id,patch)=>api("PATCH",Env.url("/api/folders/")+encodeURIComponent(id),JSON.stringify(patch),{"content-type":"application/json"});

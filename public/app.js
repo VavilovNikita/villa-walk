@@ -12,37 +12,18 @@ const PALETTE = ["#f4f1ea","#e9e4d8","#d9d2c3","#bfb6a5","#8e8576","#5a544b","#2
 function mat(hex, rough=0.7, metal=0){ const m=new THREE.MeshStandardMaterial({roughness:rough,metalness:metal}); m.color.setStyle(hex).convertSRGBToLinear(); return m; }
 function bx(g,w,h,d,x,y,z,m,tint){ const me=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),m); me.position.set(x,y,z); me.castShadow=me.receiveShadow=true; if(tint) me.userData.tint=true; g.add(me); return me; }
 function cy(g,r,h,x,y,z,m,tint,seg=24){ const me=new THREE.Mesh(new THREE.CylinderGeometry(r,r,h,seg),m); me.position.set(x,y,z); me.castShadow=me.receiveShadow=true; if(tint) me.userData.tint=true; g.add(me); return me; }
-const LEG = () => mat("#222",0.5,0.4), WOOD = () => mat("#8a6242",0.6);
-const LIB = {
-  sofa:{name:"Диван трёхместный",size:[2200,900,850],color:"#8193b8",build(t){const g=new THREE.Group(),l=LEG();
-    bx(g,2.2,.42,.9,0,.27,0,t,1);bx(g,2.2,.45,.2,0,.62,-.35,t,1);bx(g,.18,.25,.9,-1.01,.6,0,t,1);bx(g,.18,.25,.9,1.01,.6,0,t,1);
-    for(const[x,z]of[[-1,-.38],[1,-.38],[-1,.38],[1,.38]])cy(g,.03,.08,x,.04,z,l);return g;}},
-  armchair:{name:"Кресло",size:[850,850,850],color:"#c4625a",build(t){const g=new THREE.Group(),l=LEG();
-    bx(g,.85,.4,.85,0,.28,0,t,1);bx(g,.85,.42,.18,0,.66,-.33,t,1);bx(g,.14,.22,.85,-.36,.58,0,t,1);bx(g,.14,.22,.85,.36,.58,0,t,1);
-    for(const[x,z]of[[-.36,-.36],[.36,-.36],[-.36,.36],[.36,.36]])cy(g,.025,.08,x,.04,z,l);return g;}},
-  bed160:{name:"Кровать 160×200",size:[1700,2100,1000],color:"#e9e4d8",build(t){const g=new THREE.Group(),w=WOOD();
-    bx(g,1.7,.3,2.1,0,.15,0,w);bx(g,1.6,.25,2.0,0,.42,.03,t,1);bx(g,1.7,1.0,.08,0,.5,-1.03,w);
-    bx(g,.6,.12,.35,-.4,.6,-.78,mat("#fafafa",.9));bx(g,.6,.12,.35,.4,.6,-.78,mat("#fafafa",.9));return g;}},
-  bed90:{name:"Кровать 90×200",size:[1000,2100,900],color:"#dfe6ea",build(t){const g=new THREE.Group(),w=WOOD();
-    bx(g,1.0,.3,2.1,0,.15,0,w);bx(g,.9,.25,2.0,0,.42,.03,t,1);bx(g,1.0,.9,.08,0,.45,-1.03,w);return g;}},
-  nightstand:{name:"Тумбочка",size:[500,400,500],color:"#8a6242",build(t){const g=new THREE.Group();bx(g,.5,.5,.4,0,.25,0,t,1);bx(g,.44,.02,.01,0,.33,.205,mat("#222"));return g;}},
-  wardrobe:{name:"Шкаф 1200",size:[1200,600,2100],color:"#2b2926",build(t){const g=new THREE.Group();bx(g,1.2,2.1,.6,0,1.05,0,t,1);bx(g,.01,2.0,.01,0,1.05,.305,mat("#777"));return g;}},
-  dining:{name:"Обеденный стол",size:[1600,900,750],color:"#a0522d",build(t){const g=new THREE.Group(),l=LEG();
-    bx(g,1.6,.04,.9,0,.73,0,t,1);for(const[x,z]of[[-.72,-.38],[.72,-.38],[-.72,.38],[.72,.38]])bx(g,.05,.71,.05,x,.355,z,l);return g;}},
-  chair:{name:"Стул",size:[450,500,900],color:"#5f7f6a",build(t){const g=new THREE.Group(),l=LEG();
-    bx(g,.45,.05,.45,0,.46,0,t,1);bx(g,.45,.42,.04,0,.69,-.21,t,1);for(const[x,z]of[[-.2,-.2],[.2,-.2],[-.2,.2],[.2,.2]])bx(g,.03,.44,.03,x,.22,z,l);return g;}},
-  coffee:{name:"Журнальный столик",size:[900,900,420],color:"#c28a5a",build(t){const g=new THREE.Group(),l=LEG();cy(g,.45,.04,0,.4,0,t,1,40);cy(g,.025,.38,0,.19,0,l);cy(g,.25,.02,0,.01,0,l,0,32);return g;}},
-  tv:{name:"ТВ-тумба с телевизором",size:[1600,400,1200],color:"#5a544b",build(t){const g=new THREE.Group();bx(g,1.6,.5,.4,0,.25,0,t,1);bx(g,1.25,.72,.05,0,.9,-.05,mat("#111",.3,.2));return g;}},
-  desk:{name:"Письменный стол",size:[1200,600,750],color:"#e9e4d8",build(t){const g=new THREE.Group(),l=LEG();bx(g,1.2,.03,.6,0,.74,0,t,1);
-    for(const[x,z]of[[-.57,-.27],[.57,-.27],[-.57,.27],[.57,.27]])bx(g,.03,.73,.03,x,.365,z,l);return g;}},
-  rug:{name:"Ковёр 2×3 м",size:[3000,2000,10],color:"#d9d2c3",build(t){const g=new THREE.Group();const m=bx(g,3.0,.01,2.0,0,.006,0,t,1);m.castShadow=false;return g;}},
-  plant:{name:"Растение в кашпо",size:[500,500,1400],color:"#bfb6a5",build(t){const g=new THREE.Group();cy(g,.22,.45,0,.225,0,t,1);
-    const f=mat("#2f6b3a",.9);for(const[x,y,z,r]of[[0,.85,0,.32],[.12,1.1,.05,.24],[-.1,1.2,-.06,.2]]){const s=new THREE.Mesh(new THREE.IcosahedronGeometry(r,1),f);s.position.set(x,y,z);s.castShadow=true;g.add(s);}return g;}},
-  lamp:{name:"Торшер",size:[400,400,1600],color:"#d9c27a",build(t){const g=new THREE.Group(),l=LEG();cy(g,.18,.02,0,.01,0,l);cy(g,.015,1.4,0,.71,0,l,0,8);
-    const sh=new THREE.Mesh(new THREE.CylinderGeometry(.14,.2,.25,24,1,true),t);sh.position.y=1.45;sh.userData.tint=true;sh.material.side=THREE.DoubleSide;g.add(sh);return g;}},
-  lounger:{name:"Шезлонг",size:[700,2000,900],color:"#bfb6a5",build(t){const g=new THREE.Group(),w=mat("#9b8a6a",.8);bx(g,.7,.3,1.4,0,.15,.3,w);bx(g,.65,.08,1.35,0,.34,.3,t,1);
-    const b=bx(g,.65,.08,.65,0,.6,-.55,t,1);b.rotation.x=-.9;bx(g,.7,.3,.4,0,.15,-.6,w);return g;}},
-};
+/* procedural furniture lives in builtin.js and is loaded only when a scene has such an item (see loadBuiltin) */
+let LIB=null, libLoading=null;
+function loadBuiltin(){
+  if(LIB) return Promise.resolve(LIB);
+  if(!libLoading) libLoading=new Promise((res,rej)=>{
+    const sc=document.createElement("script"); sc.src=Env.url("/builtin.js");
+    sc.onload=()=>{ LIB=window.BuiltinFurniture({mat,bx,cy}); res(LIB); };
+    sc.onerror=()=>{ libLoading=null; rej(new Error("builtin.js")); };
+    document.head.append(sc);
+  });
+  return libLoading;
+}
 
 /* ---------------- three setup ---------------- */
 const stage=$("stage");
@@ -87,7 +68,7 @@ const selIds=new Set();      // ids of the selected items (selected.id is the ma
 const folders=new Map();     // id -> {name,parent,order}
 let tabSwitch=false;         // the Tab focus switch is changing the mode itself
 let myId=null, myColor="#2f6f62";
-let libTab="base";
+let libTab="up";
 let scope="all";             // what a paint action covers: all | group | piece
 const HEXRE=/^#[0-9a-f]{6}$/i;
 
@@ -125,6 +106,7 @@ function applyFinish(m,finish,o){
 
 /* ---------------- load house ---------------- */
 const loader=new THREE.GLTFLoader();
+if(window.MeshoptDecoder) loader.setMeshoptDecoder(window.MeshoptDecoder);   // compressed models (EXT_meshopt_compression)
 let houseV=null;             // version requested last (newest wins)
 let houseShown=false;        // first model is on screen
 let shownV=null;             // version of the model that is on screen
@@ -593,7 +575,7 @@ function renderCtx(soft){
     ctxS={sig,update(){}};
   } else {
     const it=items.get(selected.id); if(!it){ c.hidden=true; return; }
-    const d=it.doc, def=d.type==="builtin"?LIB[d.key]:null, mdl=d.type==="model"?models.get(d.model):null;
+    const d=it.doc, def=d.type==="builtin"?(LIB&&LIB[d.key]):null, mdl=d.type==="model"?models.get(d.model):null;
     const sig=["item",selected.id,d.type,d.key||d.model,canWrite,ctxTab,libVer].join("|");
     const size=()=>{ const bb=new THREE.Box3().setFromObject(it.obj), sz=new THREE.Vector3(); bb.getSize(sz); return sz; };
     if(soft&&ctxS&&ctxS.sig===sig){ ctxS.update(); c.hidden=false; return; }
@@ -684,8 +666,10 @@ function resetTarget(t,send){
 /* ---------------- items ---------------- */
 function buildItem(doc){
   if(doc.type==="builtin"){
-    const def=LIB[doc.key]; if(!def) return null;
-    const t=mat(doc.color||def.color,0.8); applyFinish(t,doc.finish||null,{r:0.8,m:0}); const g=def.build(t); return Promise.resolve(g);
+    return loadBuiltin().then(()=>{
+      const def=LIB[doc.key]; if(!def) return null;
+      const t=mat(doc.color||def.color,0.8); applyFinish(t,doc.finish||null,{r:0.8,m:0}); return def.build(t);
+    });
   }
   return loadModel(doc.model).then(tpl=>tpl?tpl.clone(true):null);
 }
@@ -708,7 +692,7 @@ function syncItem(id,doc){
   const needRebuild=!it||it.doc.type!==doc.type||it.doc.key!==doc.key||it.doc.model!==doc.model||(doc.type==="builtin"&&(it.doc.color!==doc.color||it.doc.finish!==doc.finish));
   if(needRebuild){
     const token=Symbol(); const holder=it||{doc,obj:new THREE.Group(),token}; holder.token=token; holder.doc=doc; holder.obj.rotation.order="YXZ";
-    if(!it){ holder.obj.userData.itemId=id; itemsRoot.add(holder.obj); items.set(id,holder); }
+    if(!it){ holder.obj.userData.itemId=id; itemsRoot.add(holder.obj); items.set(id,holder); updateLibExtras(); }
     if(doc.type!=="builtin"&&doc.model&&!modelReady.has(doc.model)&&models.has(doc.model)){ holder.obj.clear(); holder.obj.add(modelPlaceholder(doc.model)); }
     Promise.resolve(buildItem(doc)).then(g=>{
       if(holder.token!==token||!g) return;
@@ -724,7 +708,7 @@ function syncItem(id,doc){
   if(selIds.has(id)) highlight();
 }
 function dropItem(id){
-  const it=items.get(id); if(!it) return; clearItemTex(it); itemsRoot.remove(it.obj); items.delete(id);
+  const it=items.get(id); if(!it) return; clearItemTex(it); itemsRoot.remove(it.obj); items.delete(id); updateLibExtras();
   if(selIds.has(id)){
     selIds.delete(id);
     if(selected?.kind==="item"&&selected.id===id){ const rest=[...selIds]; if(rest.length) selectItems(rest); else select(null); } else { highlight(); renderCtx(); }
@@ -789,47 +773,47 @@ function renderPlaceBar(){
 }
 
 /* ---------------- library ---------------- */
-const LIB_VER="1";                       // bump when LIB geometry / colours change: invalidates cached base thumbnails
-const THUMB_LS="villa.thumb."+LIB_VER+".";
 const lsGet=k=>{ try{ return localStorage.getItem(Env.ls(k)); }catch{ return null; } };
 const lsSet=(k,v)=>{ try{ localStorage.setItem(Env.ls(k),v); }catch{} };
 let libQuery="", libSort="new", upq=null;   // upq: the upload queue (upq.js), created further down
-const baseThumbs=new Map();              // key -> dataURL (memory; localStorage as second level)
-const baseDims=new Map();                // key -> [w,d,h] mm
-const cards=new Map();                   // "base:key" | "up:id" -> {patch()}
-const thumbJobs={q:[],running:false,seen:new Set(),failed:new Set(),baseQ:[],baseRunning:false};
+const cards=new Map();                   // "up:id" -> {patch()}
+const thumbJobs={q:[],running:false,seen:new Set(),failed:new Set()};
 
 const fmtDims=d=>d?d.join("×")+" мм":"— мм";
 const fmtSize=b=>b<1048576?Math.max(1,Math.round((b||0)/1024))+" КБ":(b/1048576).toFixed(1)+" МБ";
 const libOpen=()=>!$("lib").classList.contains("collapsed");
-const baseObject=key=>{ const def=LIB[key]; return def.build(mat(def.color,0.8)); };
 const mmOf=sz=>[Math.round(sz.x*1000),Math.round(sz.z*1000),Math.round(sz.y*1000)];
-function dimsOfBase(key){
-  if(!baseDims.has(key)){ const o=baseObject(key), sz=new THREE.Vector3(); new THREE.Box3().setFromObject(o).getSize(sz); baseDims.set(key,mmOf(sz)); Thumbs.disposeObject(o); }
-  return baseDims.get(key);
+/* what the participants download: the compressed copy unless the editor chose the original (or none exists yet) */
+const servedSize=m=>!m?0:(m.liteFile&&!m.useOrig?m.sizeLite:(m.sizeOrig||m.sizeBytes))||0;
+const triText=n=>n>=1e6?(n/1e6).toFixed(1).replace(".",",")+" млн треугольников":n>=1000?Math.round(n/1000)+" тыс. треугольников":n+" треугольников";
+const mbText=n=>(n/1048576).toFixed(n>=10485760?0:1).replace(".",",")+" МБ";
+let compState={total:0,done:0};
+const compressing=m=>compState.total>0&&!m.compressedAt&&!m.compressError;
+function compressText(m){
+  if(m.liteFile&&m.compressedAt) return "Было "+mbText(m.sizeOrig)+" / "+triText(m.trisOrig)+" → стало "+mbText(m.sizeLite)+" / "+triText(m.trisLite)+(m.useOrig?". Сейчас отдаётся оригинал.":".");
+  if(m.compressError) return "Сжать не получилось, отдаётся оригинал ("+mbText(m.sizeOrig||m.sizeBytes||0)+"). Можно нажать «Пережать заново».";
+  return "Ещё не сжата: ждёт своей очереди ("+mbText(m.sizeOrig||m.sizeBytes||0)+").";
 }
-function readDataUrl(blob){ return new Promise((res,rej)=>{ const r=new FileReader(); r.onload=()=>res(r.result); r.onerror=rej; r.readAsDataURL(blob); }); }
-function baseThumbSrc(key){
-  if(baseThumbs.has(key)) return baseThumbs.get(key);
-  const v=lsGet(THUMB_LS+key); if(v&&v.startsWith("data:image/")){ baseThumbs.set(key,v); return v; }
-  return null;
+/* library footer: the compression progress and, for the editor, the button that removes the old built-in furniture from the scene */
+let extrasRaf=0;
+const builtinIds=()=>[...items.entries()].filter(([,h])=>h.doc.type==="builtin").map(([id])=>id);
+function updateLibExtras(){
+  if(extrasRaf) return; extrasRaf=requestAnimationFrame(()=>{ extrasRaf=0;
+    const box=$("libStatus"); if(!box) return; box.textContent="";
+    if(canWrite&&compState.total>0) box.append(el("div",{class:"meta",id:"compProg",text:"Сжимаю модели: "+Math.min(compState.done+1,compState.total)+" из "+compState.total}));
+    const n=canWrite?builtinIds().length:0;
+    if(n) box.append(el("button",{class:"ghost",id:"bDelBuiltin",text:"Удалить базовые предметы из сцены ("+n+" шт.)",on:{click:askDeleteBuiltin}}));
+    box.hidden=!box.firstChild;
+  });
 }
-async function makeBaseThumb(key){
-  const o=baseObject(key);
-  try{ const {blob}=await Thumbs.renderThumb(o); const url=await readDataUrl(blob); baseThumbs.set(key,url); lsSet(THUMB_LS+key,url); }
-  finally{ Thumbs.disposeObject(o); }
-}
-/* base furniture is drawn by the client on first open of the tab, one at a time; nothing goes to the server */
-async function pumpBase(){
-  if(thumbJobs.baseRunning) return; thumbJobs.baseRunning=true;
-  try{
-    while(thumbJobs.baseQ.length){
-      const key=thumbJobs.baseQ.shift();
-      try{ await makeBaseThumb(key); }catch(e){ console.warn("thumb",key,e); }
-      cards.get("base:"+key)?.patch();
-      await new Promise(r=>setTimeout(r,0));
-    }
-  } finally{ thumbJobs.baseRunning=false; }
+function askDeleteBuiltin(){
+  const ids=builtinIds(); if(!ids.length) return;
+  modal("Удалить базовые предметы?",[el("div",{text:"Из сцены будут убраны базовые предметы (диваны, кровати, столы и другая встроенная мебель): "+ids.length+" шт. Загруженные модели не затрагиваются. Это один шаг — Ctrl+Z вернёт всё обратно."})],
+    [{label:"Отмена",cls:"ghost"},{label:"Удалить ("+ids.length+")",cls:"danger",run:()=>{
+      const list=builtinIds(); if(!list.length) return;
+      pushUndo({t:"multi",ops:list.map(id=>({id,prev:items.get(id).doc}))});
+      removeMany(list); toast("Удалено базовых предметов: "+list.length+". Ctrl+Z — вернуть.");
+    }}]);
 }
 
 /* uploaded models: normalise units / pivot (mm, cm -> m; origin at bottom centre) */
@@ -840,7 +824,7 @@ function normalizeModel(root){
   return wrap;
 }
 /* own copy of a model, never shared with the scene: the caller disposes it */
-const loadFresh=m=>loadGltfProgress(Env.url("/uploads/")+m.file,null,m.sizeBytes).then(g=>normalizeModel(g.scene));
+const loadFresh=m=>loadGltfProgress(Env.url("/uploads/")+m.file,null,servedSize(m)).then(g=>normalizeModel(g.scene));
 async function makeModelThumb(id){
   const m=models.get(id); if(!m) return;
   const wrap=await loadFresh(m);
@@ -864,8 +848,7 @@ async function pumpModels(){
 const thumbWaits=m=>!!m.thumbBy&&Math.abs(Date.now()-(m.thumbPendingAt||0))<600000&&(m.thumbBy!==myId||(upq&&upq.busy()));
 function queueThumbs(){
   if(!libOpen()) return;
-  if(libTab==="base"){ for(const key of Object.keys(LIB)) if(!baseThumbSrc(key)&&!thumbJobs.baseQ.includes(key)) thumbJobs.baseQ.push(key); pumpBase(); }
-  else if(libTab==="up"&&canWrite){ for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)&&!thumbWaits(m)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
+  if(libTab==="up"&&canWrite){ for(const[id,m]of models) if(!m.thumb&&!thumbJobs.seen.has(id)&&!thumbWaits(m)){ thumbJobs.seen.add(id); thumbJobs.q.push(id); } pumpModels(); }
 }
 function cubeIcon(){
   const s=document.createElementNS("http://www.w3.org/2000/svg","svg"); s.setAttribute("viewBox","0 0 24 24"); s.setAttribute("width","30"); s.setAttribute("height","30");
@@ -1098,19 +1081,11 @@ function selBar(){
 function renderLib(){
   const L=$("libList"); stopSpin(); L.textContent=""; cards.clear();
   document.querySelectorAll(".fmenu").forEach(m=>m.remove());
-  $("tBase").setAttribute("aria-pressed",libTab==="base"); $("tUp").setAttribute("aria-pressed",libTab==="up"); $("tTex").setAttribute("aria-pressed",libTab==="tex");
-  $("uploadRow").hidden=(libTab==="base"||!canWrite); $("libSort").hidden=(libTab!=="up");
+  $("tUp").setAttribute("aria-pressed",libTab==="up"); $("tTex").setAttribute("aria-pressed",libTab==="tex");
+  $("uploadRow").hidden=!canWrite; $("libSort").hidden=(libTab!=="up");
   $("bUpload").hidden=libTab!=="up"; $("upNote").hidden=libTab!=="up"; $("bNewTex").hidden=libTab!=="tex";
   const q=libQuery.trim().toLowerCase(), hit=n=>!q||String(n).toLowerCase().includes(q);
-  if(libTab==="base"){
-    for(const[key,def]of Object.entries(LIB)){
-      if(!hit(def.name)) continue;
-      L.append(makeCard({id:key,kind:"base",name:()=>def.name,dims:()=>dimsOfBase(key),src:()=>baseThumbSrc(key),failed:()=>false,
-        onPlace:()=>startPlacing({doc:{type:"builtin",key,color:def.color,r:0,s:1}}),onInfo:()=>openPreview({kind:"base",key}),
-        build:async()=>baseObject(key)}));
-    }
-    if(!L.firstChild) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
-  } else if(libTab==="tex"){
+  if(libTab==="tex"){
     const list=texList().filter(s=>hit(Tex.nameOf(s)));
     for(const s of list) L.append(texCard(s,{pressed:tool==="tex"&&sameSrc(s,texBrush.src),
       onClick:()=>{ if(!canWrite){ openTexInfo(s); return; } texBrush={src:srcOf(s),sizeMm:null,rot:0,offMm:[0,0],tint:null}; saveTexBrush(); if(tool!=="tex") setTool("tex"); else renderTools(); renderLib(); },
@@ -1130,7 +1105,7 @@ function renderLib(){
     else if(!list.length&&searching) L.append(el("div",{class:"meta empty",text:"Ничего не найдено."}));
     else if(!list.length&&!folderKids(libFolder).length) L.append(el("div",{class:"meta empty",text:libFolder?"В этой папке пока пусто. Загрузите модель или перетащите сюда из другой папки.":"Пока ничего не загружено."}));
     for(const[id]of list){
-      L.append(makeCard({id,kind:"up",name:()=>models.get(id)?.name||"Модель",dims:()=>models.get(id)?.dims||null,extra:()=>fmtSize(models.get(id)?.sizeBytes||0),
+      L.append(makeCard({id,kind:"up",name:()=>models.get(id)?.name||"Модель",dims:()=>models.get(id)?.dims||null,extra:()=>fmtSize(servedSize(models.get(id))),
         path:searching?()=>{ const m=models.get(id); return m&&folderOf(m)?folderPath(folderOf(m)):"Все модели"; }:null,
         selected:libSel.has(id),onSelect:()=>{ if(libSel.has(id)) libSel.delete(id); else libSel.add(id); renderLib(); },
         src:()=>{ const m=models.get(id); return m?modelThumbSrc(m):null; },failed:()=>thumbJobs.failed.has(id),
@@ -1138,9 +1113,8 @@ function renderLib(){
         build:()=>{ const m=models.get(id); return m?loadFresh(m):null; }}));
     }
   }
-  queueThumbs();
+  queueThumbs(); updateLibExtras();
 }
-$("tBase").onclick=()=>{libTab="base";renderLib();};
 $("tUp").onclick=()=>{libTab="up";renderLib();};
 $("tTex").onclick=()=>{libTab="tex";renderLib();};
 $("bNewTex").onclick=newTexture;
@@ -1161,38 +1135,43 @@ function closePreview(){
 }
 async function openPreview(ref){
   closePreview(); stopSpin();
-  const isBase=ref.kind==="base", cur=()=>isBase?null:models.get(ref.id);
-  if(!isBase&&!cur()) return;
-  const title=()=>isBase?LIB[ref.key].name:(cur()?.name||"Модель");
-  const dimsNow=()=>isBase?dimsOfBase(ref.key):(cur()?.dims||null);
-  const folderLine=el("div",{class:"meta pv-folder"});
+  const cur=()=>models.get(ref.id);
+  if(!cur()) return;
+  const title=()=>cur()?.name||"Модель";
+  const dimsNow=()=>cur()?.dims||null;
+  const folderLine=el("div",{class:"meta pv-folder"}), sizeLine=el("div",{class:"meta mono pv-size"}), compLine=el("div",{class:"meta pv-comp"}), compRow=el("div",{class:"row pv-comprow",hidden:""});
   const h2=el("h2",{id:"pvTitle",text:title()}), dimsEl=el("div",{class:"meta mono"}), msg=el("div",{class:"meta",role:"status"});
   const view=el("div",{class:"pv-view"},el("div",{class:"pv-load",text:"Загружаю модель…"}));
   const actions=el("div",{class:"row pv-actions"}), confirmRow=el("div",{class:"row pv-confirm",hidden:""}), headRow=el("div",{class:"pv-head"},h2);
   const close=el("button",{class:"ghost",text:"✕","aria-label":"Закрыть",on:{click:closePreview}}); headRow.append(close);
   const dlg=el("div",{class:"panel pv-dlg",role:"dialog","aria-modal":"true","aria-labelledby":"pvTitle"},headRow,view,
     el("div",{class:"meta",text:"Крутите мышью или пальцем, колесо или щипок — масштаб."}),dimsEl,
-    isBase?null:el("div",{class:"meta mono",text:fmtSize(cur().sizeBytes||0)}),isBase?null:folderLine,actions,confirmRow,msg);
+    sizeLine,compLine,compRow,folderLine,actions,confirmRow,msg);
   const root=el("div",{id:"pv",class:"pv-back"},dlg); document.body.append(root);
   root.addEventListener("pointerdown",e=>{ if(e.target===root) closePreview(); });
-  const upd=()=>{ if(!isBase&&!cur()){ closePreview(); toast("Модель удалена."); return; } h2.textContent=title(); dimsEl.textContent=fmtDims(dimsNow()); if(!isBase){ const fo=folderOf(cur()); folderLine.textContent="Папка: "+(fo?folderPath(fo):"Все модели"); } };
+  const useOrig=el("input",{type:"checkbox",id:"pvUseOrig"}), recomp=el("button",{id:"pvRecomp",text:"Пережать заново"});
+  const compSync=()=>{ const m=cur(); if(!m||!canWrite){ compRow.hidden=true; return; } compRow.hidden=false; const has=!!m.liteFile; useOrig.disabled=!has; useOrig.checked=!!m.useOrig; useOrig.parentNode.style.opacity=has?"":".5"; recomp.disabled=compressing(m); };
+  const upd=()=>{ if(!cur()){ closePreview(); toast("Модель удалена."); return; } h2.textContent=title(); dimsEl.textContent=fmtDims(dimsNow()); const fo=folderOf(cur()); folderLine.textContent="Папка: "+(fo?folderPath(fo):"Все модели");
+    sizeLine.textContent="Скачивается: "+fmtSize(servedSize(cur())); compLine.textContent=compressText(cur()); compSync(); };
+  compRow.append(el("label",{class:"pv-orig",title:"Если после сжатия модель выглядит хуже, участники будут скачивать исходный файл"},useOrig,el("span",{text:"Отдавать оригинал вместо сжатой"})),recomp);
+  useOrig.onchange=async()=>{ useOrig.disabled=true; try{ const r=await Sync.patchModel(ref.id,{useOrig:useOrig.checked}); if(r?.doc){ const oldFile=models.get(ref.id)?.file; models.set(ref.id,r.doc); if(oldFile!==r.doc.file) reloadModelItems(ref.id); } msg.textContent=useOrig.checked?"Теперь отдаётся оригинал.":"Теперь отдаётся сжатая модель."; }catch(e){ msg.textContent="Не удалось переключить."; } upd(); };
+  recomp.onclick=async()=>{ recomp.disabled=true; try{ await Sync.recompress(ref.id); msg.textContent="Поставлена в очередь на сжатие."; }catch(e){ msg.textContent=e.code==="compression_off"?"Сжатие выключено на сервере.":"Не удалось поставить в очередь."; recomp.disabled=false; } };
   upd();
 
   const place=el("button",{class:"primary",text:"Поставить в сцену"});
-  place.onclick=()=>{ const doc=isBase?{type:"builtin",key:ref.key,color:LIB[ref.key].color,r:0,s:1}:{type:"model",model:ref.id,r:0,s:1}; closePreview(); startPlacing({doc}); };
+  place.onclick=()=>{ closePreview(); startPlacing({doc:{type:"model",model:ref.id,r:0,s:1}}); };
   if(canWrite) actions.append(place);
   const refresh=el("button",{text:"Обновить превью"});
   refresh.onclick=async()=>{
     refresh.disabled=true; msg.textContent="Перерисовываю…";
     try{
-      if(isBase){ await makeBaseThumb(ref.key); cards.get("base:"+ref.key)?.patch(); }
-      else { thumbJobs.failed.delete(ref.id); await makeModelThumb(ref.id); }
+      thumbJobs.failed.delete(ref.id); await makeModelThumb(ref.id);
       msg.textContent="Превью обновлено.";
     }catch(e){ console.warn(e); msg.textContent="Не получилось обновить превью."; }
     refresh.disabled=false;
   };
   if(canWrite) actions.append(refresh);
-  if(canWrite&&!isBase){
+  if(canWrite){
     const ren=el("button",{text:"Переименовать"}), del=el("button",{class:"danger",text:"Удалить"});
     ren.onclick=()=>{
       const inp=el("input",{type:"text",maxlength:"60","aria-label":"Новое название",class:"pv-name"}); inp.value=cur().name||"";
@@ -1227,7 +1206,7 @@ async function openPreview(ref){
   p.controls.addEventListener("start",()=>{ p.controls.autoRotate=false; });
   (canWrite?place:close).focus();
   let obj;
-  try{ obj=isBase?baseObject(ref.key):await loadFresh(cur()); }
+  try{ obj=await loadFresh(cur()); }
   catch(e){ console.warn(e); if(pv===p) view.firstChild.textContent="Не удалось загрузить модель."; return; }
   if(pv!==p){ Thumbs.disposeObject(obj); return; }
   p.obj=obj; p.st=Thumbs.stage(obj);
@@ -1260,7 +1239,7 @@ const mbOf=n=>(n/1048576).toFixed(n>=10485760?0:1)+" МБ";
 /* progress with percent and speed for an upload; returns the callback for Sync.upload */
 function upProgressCb(label,total){
   const t0=performance.now();
-  return (fr,loaded)=>{ const sec=Math.max(.001,(performance.now()-t0)/1000), sp=loaded/sec; houseProgress(label+" "+Math.round(fr*100)+"% · "+mbOf(loaded)+" из "+mbOf(total)+" · "+(sp/1048576).toFixed(1)+" МБ/с",fr); };
+  return (fr,loaded)=>{ if(fr>=1){ houseProgress("Сжимаю на сервере без потерь…"); return; } const sec=Math.max(.001,(performance.now()-t0)/1000), sp=loaded/sec; houseProgress(label+" "+Math.round(fr*100)+"% · "+mbOf(loaded)+" из "+mbOf(total)+" · "+(sp/1048576).toFixed(1)+" МБ/с",fr); };
 }
 /* bulk upload: files, folders and .zip go through the queue in upq.js; the panel and the drop zone live there and here */
 upq=Upq.create({
@@ -1296,8 +1275,8 @@ const modelReady=new Set();  // ids whose model is loaded: no placeholder for th
 function loadModel(id){
   if(modelCache.has(id)) return modelCache.get(id);
   const m=models.get(id); if(!m) return Promise.resolve(null);
-  const big=(m.sizeBytes||0)>=BIG_DL;
-  const p=loadGltfProgress(Env.url("/uploads/")+m.file,big?(fr=>{ dlProg.set(id,{name:m.name||"Модель",frac:fr}); showDl(); }):null,m.sizeBytes).then(g=>{
+  const big=servedSize(m)>=BIG_DL;
+  const p=loadGltfProgress(Env.url("/uploads/")+m.file,big?(fr=>{ dlProg.set(id,{name:m.name||"Модель",frac:fr}); showDl(); }):null,servedSize(m)).then(g=>{
       const wrap=normalizeModel(g.scene);
       wrap.traverse(o=>{ if(o.isMesh){ o.castShadow=o.receiveShadow=true; } });
       modelReady.add(id);
@@ -1433,8 +1412,7 @@ let undoKey=null, undoAt=0;
 /* key: a burst of the same kind of change (clicking "+10 mm" five times) is one undo step */
 function pushUndo(u,key){ const now=performance.now(); if(key&&undoKey===key&&undo.length&&now-undoAt<1500){ undoAt=now; return; } undo.push(u); if(undo.length>60) undo.shift(); undoKey=key||null; undoAt=now; }
 function addList(){
-  return [...Object.entries(LIB).map(([k,d])=>({doc:{type:"builtin",key:k,color:d.color},name:d.name})),
-          ...[...models.entries()].sort((a,b)=>(b[1].at||0)-(a[1].at||0)).map(([id,m])=>({doc:{type:"model",model:id},name:m.name||"Модель"}))];
+  return [...[...models.entries()].sort((a,b)=>(b[1].at||0)-(a[1].at||0)).map(([id,m])=>({doc:{type:"model",model:id},name:m.name||"Модель"}))];
 }
 function setTool(t){
   if(t&&!canWrite){ toast("Только просмотр: менять сцену нельзя."); return; }
@@ -1491,7 +1469,7 @@ function deleteTarget(){
 const P_addRecent=hex=>Picker.addRecent(hex);
 function pipette(){
   const h=aimHit(); if(!h) return; const iid=itemIdOf(h.object); let hex=null, fin=null, tx=null;
-  if(iid){ const d=items.get(iid)?.doc; tx=d?.tex||null; if(d?.type==="builtin"){ hex=d.color||LIB[d.key]?.color; fin=d.finish||null; } }
+  if(iid){ const d=items.get(iid)?.doc; tx=d?.tex||null; if(d?.type==="builtin"){ hex=d.color||LIB?.[d.key]?.color; fin=d.finish||null; } }
   else if(h.object.userData.matName){ const lk=lookOf(h.object); tx=lk.tex; hex=lk.color; fin=lk.finish; }
   if(tx&&Tex.exists(tx)){ setBrushFrom(tx); if(tool!=="tex") setTool("tex"); else renderTools(); toast("Текстура взята: «"+Tex.nameOf(tx)+"»"); return; }
   if(!hex) return; brush[brushIdx]=hex; brushFinish=fin; saveBrush(); if(tool!=="paint") setTool("paint"); else renderTools(); toast("Цвет взят: "+hex.toUpperCase());
@@ -1667,12 +1645,13 @@ function reloadModelItems(id){
   modelCache.delete(id); modelReady.delete(id);
   for(const[iid,h]of [...items]) if(h.doc.model===id){ const d=h.doc; dropItem(iid); syncItem(iid,d); }
 }
-function validModel(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}\.glb$/.test(v.file); }
+function validModel(v){ return v&&typeof v.file==="string"&&/^[a-f0-9]{16}(\.orig)?\.glb$/.test(v.file); }
 function applyState(s){
   Tex.library.clear(); for(const[k,v]of Object.entries(s.textures||{})) if(validTex(v)) Tex.library.set(k,v); libVer++;
   if(s.house) onHouseVersion(s.house.v,houseShown);
   paint.clear(); for(const[k,v]of Object.entries(s.paint||{})) if(validPaint(v)) paint.set(k,v);
   parts.clear(); for(const[k,v]of Object.entries(s.parts||{})) if(HEXRE.test(v?.color||"")&&typeof v.key==="string") parts.set(k,v);
+  compState=s.compress||{total:0,done:0};
   models.clear(); modelCache.clear(); modelReady.clear(); for(const[k,v]of Object.entries(s.models||{})) if(validModel(v)) models.set(k,v);
   folders.clear(); for(const[k,v]of Object.entries(s.folders||{})) if(validFolder(v)) folders.set(k,v);
   if(libFolder&&!folders.has(libFolder)) libFolder=null;
@@ -1701,8 +1680,9 @@ $("houseIn").onchange=async e=>{
     if(String.fromCharCode(...head.slice(0,4))!=="glTF") throw Object.assign(new Error("not_glb"),{code:"not_glb"});
     if(f.size<=BIG_WARN){ const gl=await new Promise((res,rej)=>f.arrayBuffer().then(buf=>loader.parse(buf,"",res,rej),rej)); disposeHouse(gl.scene); } // must parse, otherwise nobody gets it (big files: the server checks the header and size)
     houseProgress("Загружаю на сервер… 0%",0);
-    await Sync.uploadHouse(f,upProgressCb("Загружаю на сервер…",f.size));
+    const hr=await Sync.uploadHouse(f,upProgressCb("Загружаю на сервер…",f.size));
     houseProgress("");
+    if(hr&&hr.compressed) toast("Модель дома обновлена: было "+mbText(hr.sizeOrig)+" → стало "+mbText(hr.sizeLite)+". Оригинал сохранён.");
     if(!$("houseHist").hidden) renderHist();
   }catch(err){ houseProgress(""); toast(houseErr(err)); console.warn(err); }
   finally{ $("bHouse").disabled=false; }
@@ -1789,6 +1769,7 @@ function boot(){
   Sync.on("folder.deleted",m=>{ folders.delete(m.id); if(libFolder===m.id) libFolder=null; for(const id of [...libSel]) if(!models.has(id)) libSel.delete(id); renderLib(); });
   Sync.on("model.added",m=>{ if(validModel(m.doc)){ models.set(m.id,m.doc); renderLib(); } });
   Sync.on("model.updated",m=>{ if(validModel(m.doc)&&models.has(m.id)){ const was=folderOf(models.get(m.id)), oldFile=models.get(m.id).file; models.set(m.id,m.doc); if(oldFile!==m.doc.file) reloadModelItems(m.id); if(folderOf(m.doc)!==was) scheduleLib(); else cards.get("up:"+m.id)?.patch(); pv?.upd(); } });
+  Sync.on("compress.progress",m=>{ compState={total:m.total|0,done:m.done|0}; updateLibExtras(); pv?.upd(); });
   Sync.on("model.deleted",m=>{ models.delete(m.id); modelCache.delete(m.id); modelReady.delete(m.id); renderLib(); pv?.upd(); });
   Sync.on("house.updated",m=>onHouseVersion(m.v,true));
   Sync.on("sandbox.reset",()=>{ toast("Тренировочная среда сброшена. Перезагружаю сцену…"); setTimeout(()=>location.reload(),600); });
@@ -1812,6 +1793,10 @@ window.__villaTex=()=>({meshes:meshes.map(o=>({box:(b=>[b.min.toArray(),b.max.to
 window.__villaItem=id=>{ const h=items.get(id); if(!h) return null; const o=h.obj; return {doc:h.doc,p:o.position.toArray(),r:[o.rotation.x,o.rotation.y,o.rotation.z],s:o.scale.toArray(),sel:[...selIds],folder:libFolder}; };
 window.__villaUpq=()=>({items:upq.items().map(i=>({name:i.fileName,rel:i.rel.join("/"),status:i.status,err:i.err||"",wait:i.waitMsg||"",pct:i.pct,note:i.note||"",modelId:i.modelId||null})),...upq.state()});
 window.__villaFolder=()=>libFolder;
+/* test hooks (read only): triangles of a loaded library model, what the E tool would offer, whether the built-in furniture code was fetched */
+window.__villaModelTris=async id=>{ const w=await modelCache.get(id); let t=0; w.traverse(o=>{ if(o.isMesh){ const g=o.geometry; t+=(g.index?g.index.count:g.attributes.position.count)/3; } }); return t; };
+window.__villaAddList=()=>addList().map(x=>x.doc.type);
+window.__villaBuiltinLoaded=()=>!!LIB;
 window.__villaCam=()=>({pos:camera.position.toArray(),fov:camera.fov});
 window.__villaGizmo=()=>xf.debug();
 window.__villaSelectItems=ids=>selectItems(ids);

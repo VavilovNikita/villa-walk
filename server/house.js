@@ -11,6 +11,8 @@ const stamp = d => `${d.getUTCFullYear()}${pad(d.getUTCMonth() + 1)}${pad(d.getU
 
 function createHouse({ modelsDir, seedFile, getDoc, putDoc, broadcast }) {
   const file = path.join(modelsDir, "villa.glb");
+  const origFile = path.join(modelsDir, "villa.orig.glb");   // the file as it was uploaded, when villa.glb is its compressed copy
+  const origOf = histName => histName.replace(/\.glb$/, ".orig.glb");
   const histDir = path.join(modelsDir, "history");
   fs.mkdirSync(histDir, { recursive: true });
   if (!fs.existsSync(file) && seedFile && fs.existsSync(seedFile)) fs.copyFileSync(seedFile, file);
@@ -50,7 +52,8 @@ function createHouse({ modelsDir, seedFile, getDoc, putDoc, broadcast }) {
     const dst = path.join(histDir, name);
     try { fs.linkSync(file, dst); } catch { fs.copyFileSync(file, dst); } // hard link: villa.glb stays in place until the atomic rename
     // only old history files are pruned, nothing else in the volume is touched
-    for (const h of history().slice(KEEP)) fs.rmSync(path.join(histDir, h.name), { force: true });
+    if (fs.existsSync(origFile)) { const o = path.join(histDir, origOf(name)); try { fs.linkSync(origFile, o); } catch { fs.copyFileSync(origFile, o); } }
+    for (const h of history().slice(KEEP)) { fs.rmSync(path.join(histDir, h.name), { force: true }); fs.rmSync(path.join(histDir, origOf(h.name)), { force: true }); }
   }
 
   function bump() {
@@ -60,10 +63,11 @@ function createHouse({ modelsDir, seedFile, getDoc, putDoc, broadcast }) {
     return meta;
   }
 
-  /* tmp must be a validated file inside modelsDir (same filesystem => rename is atomic) */
-  function install(tmp) {
+  /* tmp must be a validated file inside modelsDir (same filesystem => rename is atomic); orig: the uploaded original, when tmp is its compressed copy */
+  function install(tmp, orig) {
     archiveCurrent();
     fs.renameSync(tmp, file);
+    if (orig) fs.renameSync(orig, origFile); else fs.rmSync(origFile, { force: true });
     try { fs.chmodSync(file, 0o644); } catch {}
     return bump();
   }
@@ -74,8 +78,8 @@ function createHouse({ modelsDir, seedFile, getDoc, putDoc, broadcast }) {
     if (typeof name !== "string" || !HIST_RE.test(name)) return null;
     const src = path.join(histDir, name);
     if (!fs.existsSync(src) || !validate(src)) return null;
-    const tmp = tmpName();
-    try { fs.copyFileSync(src, tmp); return install(tmp); } catch (e) { fs.rmSync(tmp, { force: true }); throw e; }
+    const tmp = tmpName(), oSrc = path.join(histDir, origOf(name)), oTmp = fs.existsSync(oSrc) ? tmpName() : null;
+    try { fs.copyFileSync(src, tmp); if (oTmp) fs.copyFileSync(oSrc, oTmp); return install(tmp, oTmp); } catch (e) { fs.rmSync(tmp, { force: true }); if (oTmp) fs.rmSync(oTmp, { force: true }); throw e; }
   }
 
   /* file placed by hand (scp): validate and announce; incoming = optional other file inside modelsDir to swap in */
@@ -94,7 +98,7 @@ function createHouse({ modelsDir, seedFile, getDoc, putDoc, broadcast }) {
     return { meta: bump() };
   }
 
-  return { get meta() { return meta; }, validate, history, install, restore, reload, tmpName, KEEP };
+  return { get meta() { return meta; }, origSize() { try { return fs.statSync(origFile).size; } catch { return 0; } }, validate, history, install, restore, reload, tmpName, KEEP };
 }
 
 module.exports = { createHouse };

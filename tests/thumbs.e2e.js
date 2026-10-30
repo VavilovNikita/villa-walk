@@ -67,22 +67,9 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     };
     const editor = await mk("editor", KEY), viewer = await mk("viewer", null);
     assert(await editor.isVisible("#lib") && await viewer.isVisible("#lib"), "both see the library");
-    await viewer.waitForFunction(() => document.querySelectorAll("#libList .thumb img").length === 15, null, { timeout: 90000 });
-    step("viewer sees the base library with its own client-rendered thumbnails");
-
-    /* base tab: client-rendered thumbnails, cached in localStorage, never sent to the server */
-    await editor.waitForFunction(() => document.querySelectorAll("#libList .thumb img").length === 15, null, { timeout: 90000 });
-    const ls = await editor.evaluate(() => Object.keys(localStorage).filter(k => k.startsWith("villa.thumb.1.")).length);
-    assert.strictEqual(ls, 15);
-    assert(await editor.evaluate(() => [...document.querySelectorAll("#libList .thumb img")].every(i => i.src.startsWith("data:image/") && i.loading === "lazy")));
-    assert.strictEqual(await editor.locator("#libList .card:not(.fcard)").count(), 15);
-    assert.match(await editor.locator("#libList .card:not(.fcard)").first().locator(".cd").textContent(), /^\d+×\d+×\d+ мм$/);
-    assert.strictEqual(fs.readdirSync(path.join(DATA, "uploads")).length, 0, "nothing for base furniture on the server");
-    step("base tab: 15 cards with lazy <img> thumbnails, cached in localStorage, nothing uploaded");
-
-    /* search */
-    await editor.fill("#libSearch", "диван"); assert.strictEqual(await editor.locator("#libList .card:not(.fcard)").count(), 1);
-    await editor.fill("#libSearch", ""); assert.strictEqual(await editor.locator("#libList .card:not(.fcard)").count(), 15);
+    assert.strictEqual(await editor.locator("#tBase").count(), 0, "the base furniture tab is gone");
+    assert.strictEqual(await editor.locator("#libList .card:not(.fcard)").count(), 0, "no built-in cards");
+    step("no base furniture in the library");
 
     /* viewer: switch its (hidden) library to the uploaded tab to watch the cards */
     await viewer.evaluate(() => { window.__noReload = 1; });
@@ -92,7 +79,7 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     assert(await editor.isVisible("#bUpload") && !(await viewer.isVisible("#bUpload")), "only the editor can upload");
 
     /* 1. editor uploads through the UI -> viewer gets the card with a thumbnail, no reload */
-    await editor.setInputFiles("#fileIn", glbFile("tablea.glb", 1.2, 0.5, 0.6, [0.8, 0.3, 0.2]));
+    await editor.setInputFiles("#upFiles", glbFile("tablea.glb", 1.2, 0.5, 0.6, [0.8, 0.3, 0.2]));
     await viewer.waitForSelector("#libList .card:not(.fcard)");
     await viewer.waitForFunction(() => { const i = document.querySelector("#libList .card:not(.fcard) img"); return i && /^\/uploads\/[a-f0-9]{16}\.thumb\.(webp|png)\?t=\d+$/.test(i.getAttribute("src")); }, null, { timeout: 30000 });
     assert.strictEqual(await viewer.evaluate(() => window.__noReload), 1, "viewer was not reloaded");
@@ -142,11 +129,11 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     step("viewer: preview + rotation + size, no action buttons; PATCH/DELETE/upload without key -> 403");
 
     /* 3. a model that has no thumbnail (uploaded through the API) is filled in when the editor opens the tab */
-    await editor.click("#tBase");
+    await editor.click("#libClose");   // a collapsed library draws no thumbnails
     const B = await apiUpload(glbFile("shelf.glb", 0.4, 1.8, 0.3, [0.2, 0.5, 0.7]), "Полка");
-    await editor.waitForFunction(() => window.__villa().cards.length >= 15); await sleep(1500);
+    await sleep(2500);
     assert.strictEqual((await state()).models[B].thumb, null, "not generated while the tab is closed");
-    await editor.click("#tUp");
+    await editor.click("#libClose");
     await viewer.waitForFunction(id => { const c = [...document.querySelectorAll("#libList .card:not(.fcard)")]; return c.length === 2 && c.every(x => x.querySelector("img")); }, B, { timeout: 30000 });
     st = await state(); assert(st.models[B].thumb && st.models[B].dims.join() === "400,300,1800", JSON.stringify(st.models[B]));
     step("old model without a thumbnail got one when the editor opened the tab; viewer updated live");
@@ -188,13 +175,14 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     /* delete with in-window confirmation, only this model's files go */
     const files = () => fs.readdirSync(path.join(DATA, "uploads")).sort();
     assert(files().some(f => f.startsWith(A + ".thumb.")) && files().some(f => f.startsWith(B + ".thumb.")));
+    const modelA = (await state()).models[A];
     await editor.click("#pv >> text=Удалить");
     assert(await editor.isVisible("#pv .pv-confirm"), "confirmation shown inside the window");
     assert.strictEqual((await state()).models[A].name, "Стол А", "nothing deleted before confirming");
     await editor.click("#pv >> text=Да, удалить");
     await editor.waitForSelector("#pv", { state: "detached" });
     await viewer.waitForFunction(() => document.querySelectorAll("#libList .card:not(.fcard)").length === 1);
-    assert(!files().some(f => f.startsWith(A)) && files().some(f => f.startsWith(B + ".thumb.")) && files().includes(B + ".glb"), "only model A's files removed: " + files());
+    assert(!files().some(f => f.startsWith(A) || f === modelA.origFile) && files().some(f => f.startsWith(B + ".thumb.")) && files().includes((await state()).models[B].origFile), "only model A's files removed: " + files());
     step("delete confirmed in the window; model + its thumbnail gone, the other model's files kept");
 
     /* "Поставить в сцену" from the window */
@@ -206,6 +194,6 @@ const state = async () => (await fetch(BASE + "/api/state")).json();
     assert.strictEqual(errs.length, 0, errs.join("\n"));
     console.log("\nALL OK");
   } finally {
-    await browser.close(); srv.kill("SIGTERM"); fs.rmSync(DATA, { recursive: true, force: true });
+    await browser.close(); srv.kill("SIGTERM"); await new Promise(r => setTimeout(r, 500)); try { fs.rmSync(DATA, { recursive: true, force: true }); } catch {}
   }
 })().catch(e => { console.error("FAIL:", e && e.stack || e); process.exit(1); });

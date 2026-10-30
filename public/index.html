@@ -77,7 +77,10 @@ button[aria-pressed="true"]{background:var(--accent-soft);border-color:var(--acc
 .thumb .ph{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:var(--muted);font-size:11px;text-align:center}
 .card-i{position:absolute;top:8px;right:8px;width:24px;height:24px;min-height:0;padding:0;border-radius:50%;font:italic 600 13px/22px Georgia,serif;background:var(--panel);text-align:center}
 #uploadRow{padding:0 12px 12px;display:flex;flex-direction:column;gap:6px}
-#lib.collapsed .tabs,#lib.collapsed .list,#lib.collapsed #uploadRow{display:none}
+.libstatus{padding:0 12px 10px;display:flex;flex-direction:column;gap:6px}
+.pv-comp{line-height:1.35}
+.pv-orig{display:flex;align-items:center;gap:6px;font-size:13px}
+#lib.collapsed .tabs,#lib.collapsed .list,#lib.collapsed #uploadRow,#lib.collapsed .libstatus{display:none}
 
 
 /* preview window */
@@ -314,8 +317,7 @@ html.sandbox #sandboxBar{position:absolute;top:-26px}
 <div id="lib" class="panel">
   <header><span class="label">Мебель и модели</span><button id="libClose" class="ghost" aria-label="Свернуть">—</button></header>
   <div class="tabs">
-    <button id="tBase" aria-pressed="true">Базовая</button>
-    <button id="tUp" aria-pressed="false">Загруженные</button>
+    <button id="tUp" aria-pressed="true">Загруженные</button>
     <button id="tTex" aria-pressed="false">Текстуры</button>
   </div>
   <div class="libtools">
@@ -323,6 +325,7 @@ html.sandbox #sandboxBar{position:absolute;top:-26px}
     <select id="libSort" aria-label="Сортировка" hidden><option value="new">Новые</option><option value="name">По названию</option></select>
   </div>
   <div class="list" id="libList"></div>
+  <div id="libStatus" class="libstatus" hidden role="status"></div>
   <div id="uploadRow" hidden>
     <div class="row"><button id="bUpload" class="primary" title="Выберите сразу много файлов: .glb, .gltf (с .bin и текстурами рядом) или .zip">Загрузить модели</button><button id="bUploadDir" title="Папка целиком: подпапки станут папками библиотеки">Загрузить папку</button></div>
     <button id="bNewTex" class="primary" hidden>Новая текстура (по фото)</button>
@@ -351,6 +354,7 @@ html.sandbox #sandboxBar{position:absolute;top:-26px}
 <script src="/base.js"></script>
 <script src="/vendor/three.min.js"></script>
 <script src="/vendor/GLTFLoader.js"></script>
+<script src="/vendor/meshopt_decoder.js"></script>
 <script src="/vendor/OrbitControls.js"></script>
 <script src="/vendor/TransformControls.js"></script>
 <script src="/thumbs.js"></script>
