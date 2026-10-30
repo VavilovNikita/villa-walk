@@ -121,7 +121,23 @@ async function fetchBuf(url,onProg,total){
   const out=new Uint8Array(got); let o=0; for(const c of parts){ out.set(c,o); o+=c.length; }
   return out.buffer;
 }
-const parseGltf=buf=>new Promise((res,rej)=>loader.parse(buf,Env.url("/uploads/"),res,rej));
+/* A compressed model keeps its vertex positions as normalised integers (KHR_mesh_quantization). The GPU un-normalises them, but three r128's CPU side (raycast, Box3, bounding spheres)
+   reads the raw integers, so a click missed the model and its size was wrong. Positions become plain floats (the node's own scale already restores the real size). */
+const NORM_DIV={Int16Array:32767,Uint16Array:65535,Int8Array:127,Uint8Array:255};
+function unquantize(root){
+  root.traverse(o=>{
+    if(!o.isMesh||!o.geometry) return;
+    const g=o.geometry, p=g.attributes.position; if(!p||!p.normalized) return;
+    const arr=p.isInterleavedBufferAttribute?p.data.array:p.array, div=NORM_DIV[arr.constructor.name]; if(!div) return;
+    const f=new Float32Array(p.count*3), signed=arr.constructor.name[0]==="I";
+    for(let i=0;i<p.count;i++){ f[i*3]=p.getX(i)/div; f[i*3+1]=p.getY(i)/div; f[i*3+2]=p.getZ(i)/div; }
+    if(signed) for(let i=0;i<f.length;i++) if(f[i]<-1) f[i]=-1;
+    g.setAttribute("position",new THREE.BufferAttribute(f,3));
+    g.boundingBox=null; g.boundingSphere=null;
+  });
+  return root;
+}
+const parseGltf=buf=>new Promise((res,rej)=>loader.parse(buf,Env.url("/uploads/"),g=>{ unquantize(g.scene); res(g); },rej));
 const loadGltfProgress=(url,onProg,total)=>fetchBuf(url,onProg,total).then(parseGltf);
 
 /* walks a scene and builds everything that depends on the house: materials, collision / floor lists, roof parts */
@@ -337,13 +353,17 @@ renderer.domElement.addEventListener("pointerup",e=>{
   if(moved) return;
   if(mode==="walk" && !isTouch && !locked){ renderer.domElement.requestPointerLock?.(); return; }
   if(tool){ if(!locked) setNdc(e); useTool(); return; }
-  setNdc(e); const h=pickAt(locked);
+  setNdc(e); clickSelect(locked);
+});
+/* a plain click (orbit) or the crosshair (walk, pointer locked) picks an item or a surface */
+function clickSelect(locked){
+  const h=pickAt(locked);
   if(!h){ select(null); return; }
   const iid=itemIdOf(h.object);
   if(iid) select({kind:"item",id:iid});
   else if(h.object.userData.matName) select({kind:"mat",name:h.object.userData.matName,mesh:h.object});
   if(locked && selected) document.exitPointerLock();
-});
+}
 document.addEventListener("pointerlockchange",()=>{ updateHint(); });
 /* capture phase: Shift+wheel with the texture brush must not also zoom the orbit camera (OrbitControls listens on the same element) */
 renderer.domElement.addEventListener("wheel",e=>{
@@ -1797,6 +1817,9 @@ window.__villaFolder=()=>libFolder;
 window.__villaModelTris=async id=>{ const w=await modelCache.get(id); let t=0; w.traverse(o=>{ if(o.isMesh){ const g=o.geometry; t+=(g.index?g.index.count:g.attributes.position.count)/3; } }); return t; };
 window.__villaAddList=()=>addList().map(x=>x.doc.type);
 window.__villaBuiltinLoaded=()=>!!LIB;
+window.__villaWalkAim=(x,z,yaw)=>{ walk.pos.set(x,walk.pos.y,z); walk.yaw=yaw; walk.pitch=-0.1; };
+window.__villaCrosshairClick=()=>clickSelect(true);   // what a click does while the pointer is locked in Walk
+window.__villaPick=(x,y)=>{ const r=renderer.domElement.getBoundingClientRect(); ndc.set((x-r.left)/r.width*2-1,-((y-r.top)/r.height)*2+1); const h=pickAt(false); return h?{name:h.object.name,mat:h.object.userData.matName||null,item:itemIdOf(h.object),dist:h.distance}:null; };
 window.__villaCam=()=>({pos:camera.position.toArray(),fov:camera.fov});
 window.__villaGizmo=()=>xf.debug();
 window.__villaSelectItems=ids=>selectItems(ids);
